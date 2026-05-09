@@ -96,20 +96,53 @@ Für einen zweiten Agent (Hermine): den auskommentierten Block in
 `docker-compose.yml` aktivieren oder einen weiteren Container mit anderer
 `AGENT_ID` starten.
 
-## Schneller Start
+## Schneller Start (Production)
+
+Pre-built Images sind als ghcr.io-Pakete verfügbar. Für ein neues Setup
+genügt das Setup-Skript:
 
 ```bash
-docker compose up -d --build playbook-registry
-
-# Health-Check (von einem anderen Container im hermes-net):
-curl http://playbook-registry:8000/health
-
-# Logs:
-docker compose logs -f playbook-registry
+curl -fsSL https://raw.githubusercontent.com/patrickblattner/hermes-playbook-registry/main/setup.sh | bash
 ```
 
-Zum Debuggen vom Host aus: in `docker-compose.yml` das `ports`-Mapping einkommentieren,
-dann `curl http://localhost:8080/health`.
+Default-Install-Pfad: `~/hermes-playbook-registry`. Anpassen via:
+
+```bash
+INSTALL_DIR=/opt/hermes-playbook-registry bash setup.sh
+```
+
+Das Skript ist idempotent — nochmal laufen aktualisiert auf den neuesten
+Image-Tag (`pull && up -d` nur recreated geänderte Container).
+
+Stop / Update:
+
+```bash
+cd ~/hermes-playbook-registry
+docker compose logs -f                                  # Logs
+docker compose down                                     # stoppen, Daten bleiben
+docker compose down -v                                  # stoppen + Daten weg
+INSTALL_DIR=~/hermes-playbook-registry bash setup.sh    # update
+```
+
+## Schneller Start (Development, aus Source)
+
+Wer Code-Änderungen testen will, ohne erst pushen zu müssen, lädt zusätzlich
+`docker-compose.dev.yml` als Override:
+
+```bash
+git clone https://github.com/patrickblattner/hermes-playbook-registry
+cd hermes-playbook-registry
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+```
+
+Tests gegen den lokalen Code:
+
+```bash
+docker run --rm -v "$(pwd)":/app -w /app python:3.12 bash -c "
+  pip install -q -r requirements.txt -r mcp-server/requirements.txt -r tests/requirements.txt
+  python -m pytest tests/ -v
+"
+```
 
 ## API-Übersicht
 
@@ -173,10 +206,65 @@ curl $REG/playbooks/1
 curl $REG/playbooks/by-skill/gcp-auth-workload-identity/versions
 ```
 
-## Direkter DB-Zugriff (Debug)
+## Operations
+
+### Backup (online, ohne Service-Stop)
 
 ```bash
-docker compose exec playbook-registry sqlite3 /data/playbooks.db
+docker exec playbook-registry /app/scripts/backup.sh
+# Backups landen in /data/backups/playbooks-<UTC-timestamp>.db, Rotation behält
+# die letzten RETAIN (Default 24) Stück. Override via ENV beim Aufruf:
+#   docker exec -e RETAIN=168 playbook-registry /app/scripts/backup.sh
+```
+
+Stündlich automatisch via Host-Cron:
+
+```bash
+0 * * * * docker exec playbook-registry /app/scripts/backup.sh >> /var/log/playbook-backup.log 2>&1
+```
+
+### Restore (Service muss gestoppt sein)
+
+```bash
+docker compose stop playbook-registry
+docker run --rm -v hermes-playbook-registry_playbook-data:/data \
+  ghcr.io/patrickblattner/hermes-playbook-registry:latest \
+  /app/scripts/restore.sh /data/backups/playbooks-20260509-120000Z.db
+docker compose start playbook-registry
+```
+
+`restore.sh` legt vor jedem Restore eine Safety-Copy der aktuellen DB an, falls
+das Backup doch nicht funktioniert.
+
+### Health-Probe (für externes Monitoring)
+
+```bash
+docker exec playbook-registry /app/scripts/healthcheck.sh
+# Exit 0 = ok, 1 = degraded (DB tot), 2 = HTTP unerreichbar
+```
+
+Beispiel als Cron-Alert:
+
+```bash
+*/5 * * * * docker exec playbook-registry /app/scripts/healthcheck.sh \
+            || mail -s "playbook-registry health failed" ops@example.com
+```
+
+### DB-Migrationen
+
+Schema-Änderungen kommen als nummerierte SQL-Files in `migrations/`
+(z.B. `002_add_tags.sql`). Beim Container-Start werden alle Files in
+aufsteigender Reihenfolge gegen die `_migrations`-Tracking-Tabelle abgeglichen
+und nur die neuen ausgeführt — idempotent.
+
+Existing-DBs sind sicher: alle bestehenden Tables bleiben (CREATE IF NOT
+EXISTS), die erste Migration wird beim ersten Upgrade als applied markiert,
+künftige Migrationen laufen normal.
+
+### Direkter DB-Zugriff (Debug)
+
+```bash
+docker exec -it playbook-registry sqlite3 /data/playbooks.db
 ```
 
 Nützliche Queries:
@@ -248,7 +336,9 @@ def submit_candidate(payload, max_retries=3):
 6. **Phase 6**: Lifecycle und Bewertung — Wilson-Score-Ranking, Auto-Promote,
    Auto-Demote, Auto-Archive älterer Versionen.
 7. **Phase 7**: MCP-Wrapper über die REST-API — agent-natives Interface.
-8. **Phase 8** (separat): Hermes-Skills `consult-playbook-registry` und
+8. **Phase 8**: Production-Readiness — Tests (pytest), Migrations, Backup-Skripte,
+   GitHub-Actions-Build, pre-built Images via GHCR, `setup.sh` als One-shot-Installer.
+9. **Phase 9** (separat): Hermes-Skills `consult-playbook-registry` und
    `submit-playbook-candidate` in den Agenten implementieren.
 
 ## Bewusst ausgeklammert (für später)

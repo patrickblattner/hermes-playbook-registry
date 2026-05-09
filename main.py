@@ -39,7 +39,7 @@ from models import (
 # ---------- Konfiguration ----------
 
 DB_PATH = os.environ.get("PLAYBOOK_DB_PATH", "/data/playbooks.db")
-SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 # Retry-Reihe: 50ms, 100ms, 200ms, 400ms, 800ms (+ Jitter ≤50ms).
 # busy_timeout=5000 fängt schon das meiste ab — das hier ist Belt & Suspenders
@@ -67,27 +67,51 @@ logger = logging.getLogger("registry")
 # ---------- DB-Initialisierung ----------
 
 def init_db() -> None:
-    """Schema beim Start anlegen (idempotent)."""
+    """
+    Migrations beim Start anwenden. _migrations-Tabelle merkt sich, welche
+    Files schon ausgeführt wurden — neue Migrationen sind einfach numerisch
+    benannte SQL-Files in migrations/ (z.B. 002_add_tags.sql) und werden in
+    aufsteigender Reihenfolge applied. Existing DBs: alle vorhandenen Tables
+    bleiben unberührt (CREATE TABLE IF NOT EXISTS), erste Migration wird
+    danach als applied markiert, künftige Migrationen laufen normal.
+    """
     db_dir = Path(DB_PATH).parent
     db_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"Initialisiere DB unter {DB_PATH}")
     conn = sqlite3.connect(DB_PATH)
     try:
-        # WAL persistent setzen (PRAGMA journal_mode=WAL ist persistent in SQLite)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
 
-        schema_sql = SCHEMA_PATH.read_text()
-        conn.executescript(schema_sql)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS _migrations (
+                name        TEXT PRIMARY KEY,
+                applied_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         conn.commit()
 
-        # Verifiziere journal_mode
+        applied = {row[0] for row in conn.execute("SELECT name FROM _migrations")}
+        files = sorted(MIGRATIONS_DIR.glob("*.sql"))
+        if not files:
+            logger.warning(f"Keine Migrations in {MIGRATIONS_DIR}")
+        for sql_file in files:
+            if sql_file.name in applied:
+                continue
+            logger.info(f"Apply migration: {sql_file.name}")
+            conn.executescript(sql_file.read_text())
+            conn.execute(
+                "INSERT INTO _migrations (name) VALUES (?)", (sql_file.name,)
+            )
+            conn.commit()
+
         mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
         logger.info(f"DB initialisiert. journal_mode={mode}")
 
-        # Verifiziere FTS5 verfügbar
         try:
             conn.execute("SELECT 1 FROM playbooks_fts LIMIT 1")
             logger.info("FTS5 funktional.")

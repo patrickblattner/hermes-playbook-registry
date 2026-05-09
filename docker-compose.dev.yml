@@ -1,0 +1,16 @@
+# Override-File für Entwickler: ersetzt die GHCR-Images durch Local-Build aus
+# dem Source-Tree. Verwendung:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+#
+# Damit kannst du Code-Änderungen testen, ohne erst pushen + warten auf den
+# CI-Build zu müssen.
+
+services:
+  playbook-registry:
+    build: .
+    image: hermes-playbook-registry:dev
+
+  playbook-registry-mcp-hermes:
+    build: ./mcp-server
+    image: hermes-playbook-registry-mcp:dev

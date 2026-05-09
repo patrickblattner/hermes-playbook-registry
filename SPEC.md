@@ -347,6 +347,11 @@ Ein gemeinsames Network `hermes-net`. Volume `playbook-data` für Persistenz.
    Validation), Auto-Demote bei Drift, Auto-Archive älterer Versionen.
 7. **Phase 7**: MCP-Wrapper als zweiter Container im hermes-net. Tool-Mapping
    1:1 auf REST. Agent-Identität wird serverseitig aus `AGENT_ID` befüllt.
+8. **Phase 8**: Production-Readiness. Pytest-Test-Suite (REST + Lifecycle +
+   Concurrency + Wilson + STDIO-MCP). DB-Migrationen via `migrations/` mit
+   `_migrations`-Tracking. Online-Backup/Restore via Skripte. Healthcheck-
+   Probe. GitHub-Actions baut Multi-Arch-Images (linux/amd64,arm64) zu GHCR.
+   Pre-built Images via `setup.sh` als One-shot-Installer.
 
 ## MCP-Wrapper (Phase 7)
 

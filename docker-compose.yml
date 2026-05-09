@@ -1,10 +1,14 @@
-# docker-compose.yml
-# Orchestriert den Registry-Service und (als Platzhalter) zwei Hermes-Agenten
-# in einem gemeinsamen internen Network.
+# Production-Compose: zieht pre-built Images aus GHCR.
+# Für Entwickler-Build aus dem Source-Tree: zusätzlich docker-compose.dev.yml laden.
+#
+#   docker compose pull && docker compose up -d                    # Production
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build  # Dev
+#
+# Image-Tag wird über REGISTRY_TAG gesteuert (default 'latest').
 
 services:
   playbook-registry:
-    build: .
+    image: ghcr.io/patrickblattner/hermes-playbook-registry:${REGISTRY_TAG:-latest}
     container_name: playbook-registry
     restart: unless-stopped
     volumes:
@@ -24,7 +28,7 @@ services:
   # Alternative: STDIO-Modus (MCP_TRANSPORT=stdio), siehe README.
 
   playbook-registry-mcp-hermes:
-    build: ./mcp-server
+    image: ghcr.io/patrickblattner/hermes-playbook-registry-mcp:${REGISTRY_TAG:-latest}
     container_name: playbook-registry-mcp-hermes
     restart: unless-stopped
     depends_on:
@@ -36,13 +40,12 @@ services:
       - AGENT_ID=hermes
       - MCP_TRANSPORT=http
       - MCP_PORT=8001
-    # Standardmäßig kein Port-Mapping; nur intern via http://playbook-registry-mcp-hermes:8001
     # ports:
     #   - "127.0.0.1:8001:8001"
 
   # Beispiel für einen zweiten Agent (Hermine). Aktivieren bei Bedarf.
   # playbook-registry-mcp-hermine:
-  #   build: ./mcp-server
+  #   image: ghcr.io/patrickblattner/hermes-playbook-registry-mcp:${REGISTRY_TAG:-latest}
   #   container_name: playbook-registry-mcp-hermine
   #   restart: unless-stopped
   #   depends_on:

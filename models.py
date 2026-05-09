@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ---------- Submission ----------
@@ -33,6 +33,10 @@ class CandidateResponse(BaseModel):
 # ---------- Validation ----------
 
 class ValidationSubmission(BaseModel):
+    # 'model_used' kollidiert mit Pydantic v2 protected namespace 'model_'.
+    # Wir wollen das Feld so behalten, also Namespace-Schutz für diese Klasse aus.
+    model_config = ConfigDict(protected_namespaces=())
+
     validator_agent: str = Field(..., min_length=1, max_length=100)
     success: bool
     latency_ms: int | None = None
@@ -82,6 +86,8 @@ class PlaybookWithValidations(PlaybookOut):
 
 
 class ValidationOut(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     id: int
     playbook_id: int
     validator_agent: str

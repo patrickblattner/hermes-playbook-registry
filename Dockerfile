@@ -4,12 +4,20 @@ FROM python:3.12
 
 WORKDIR /app
 
+# sqlite3 CLI für Online-Backups (sqlite3 ".backup ...") und Debug-Zugriff.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends sqlite3 \
+ && rm -rf /var/lib/apt/lists/*
+
 # Requirements zuerst (besseres Docker-Layer-Caching)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Application code
-COPY main.py models.py schema.sql ./
+COPY main.py models.py ./
+COPY migrations ./migrations
+COPY scripts ./scripts
+RUN chmod +x ./scripts/*.sh
 
 # Data-Verzeichnis für die SQLite-DB
 RUN mkdir -p /data
