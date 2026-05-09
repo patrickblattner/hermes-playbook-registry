@@ -12,7 +12,9 @@ Volltextsuche: SQLite FTS5.
 import json
 import logging
 import os
+import random
 import sqlite3
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Generator
@@ -37,6 +39,12 @@ from models import (
 
 DB_PATH = os.environ.get("PLAYBOOK_DB_PATH", "/data/playbooks.db")
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+
+# Retry-Reihe: 50ms, 100ms, 200ms, 400ms, 800ms (+ Jitter ≤50ms).
+# busy_timeout=5000 fängt schon das meiste ab — das hier ist Belt & Suspenders
+# für den Fall, dass beide Agenten exakt gleichzeitig schreiben.
+DB_RETRY_MAX_ATTEMPTS = 5
+DB_RETRY_BASE_DELAY = 0.05
 
 logging.basicConfig(
     level=logging.INFO,
@@ -93,6 +101,44 @@ def get_db() -> Generator[sqlite3.Connection, None, None]:
         yield conn
     finally:
         conn.close()
+
+
+# ---------- Retry-Helper für Writes ----------
+
+def execute_with_retry(
+    conn: sqlite3.Connection,
+    sql: str,
+    params: tuple = (),
+    max_attempts: int = DB_RETRY_MAX_ATTEMPTS,
+) -> sqlite3.Cursor:
+    """
+    Single-Statement Write mit Exponential Backoff bei SQLITE_BUSY/locked.
+
+    busy_timeout=5000 erledigt nativ das meiste; diese Schicht greift nur, wenn
+    nach 5s immer noch ein Lock anliegt. Bei 2-3 Agenten extrem unwahrscheinlich.
+
+    Andere OperationalErrors (z.B. UNIQUE Constraint Violation kommt als
+    IntegrityError) werden NICHT retryt → sofort weitergereicht.
+    """
+    last_error: sqlite3.OperationalError | None = None
+    for attempt in range(max_attempts):
+        try:
+            cur = conn.execute(sql, params)
+            conn.commit()
+            return cur
+        except sqlite3.OperationalError as e:
+            msg = str(e).lower()
+            if "locked" not in msg and "busy" not in msg:
+                raise
+            last_error = e
+            if attempt < max_attempts - 1:
+                delay = DB_RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.05)
+                logger.warning(
+                    f"DB locked (attempt {attempt + 1}/{max_attempts}), retry in {delay:.3f}s"
+                )
+                time.sleep(delay)
+    assert last_error is not None
+    raise last_error
 
 
 # ---------- Helper: Row -> Dict für Pydantic ----------
@@ -153,40 +199,77 @@ def submit_candidate(
     submission: CandidateSubmission,
     conn: sqlite3.Connection = Depends(get_db),
 ):
-    """Reicht einen neuen Playbook-Kandidaten ein. Bei bestehendem skill_id → neue Version."""
-    cur = conn.cursor()
+    """
+    Reicht einen neuen Playbook-Kandidaten ein. Bei bestehendem skill_id → neue Version.
+    Wiederholter Submit mit gleichem idempotency_key → Replay der ursprünglichen Antwort.
+    """
+    # 1. Idempotenz-Check (vor dem Insert): Key bekannt? → fertige Antwort zurück.
+    if submission.idempotency_key:
+        existing = conn.execute(
+            "SELECT id, skill_id, version, status FROM playbooks WHERE idempotency_key = ?",
+            (submission.idempotency_key,),
+        ).fetchone()
+        if existing:
+            logger.info(
+                f"Idempotenter Replay: key={submission.idempotency_key} → id={existing['id']}"
+            )
+            return CandidateResponse(
+                id=existing["id"],
+                skill_id=existing["skill_id"],
+                version=existing["version"],
+                status=existing["status"],
+                idempotent_replay=True,
+            )
 
-    # Höchste vorhandene Version für diesen skill_id ermitteln
-    cur.execute(
+    # 2. Nächste Version für diesen skill_id ermitteln.
+    max_version = conn.execute(
         "SELECT MAX(version) FROM playbooks WHERE skill_id = ?",
         (submission.skill_id,),
-    )
-    max_version = cur.fetchone()[0]
+    ).fetchone()[0]
     new_version = (max_version or 0) + 1
 
     metadata_json = json.dumps(submission.metadata) if submission.metadata else None
 
-    cur.execute(
-        """
-        INSERT INTO playbooks
-            (skill_id, version, status, problem_domain, problem_description,
-             approach, content, author_agent, metadata)
-        VALUES (?, ?, 'candidate', ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            submission.skill_id,
-            new_version,
-            submission.problem_domain,
-            submission.problem_description,
-            submission.approach,
-            submission.content,
-            submission.author_agent,
-            metadata_json,
-        ),
-    )
-    conn.commit()
-    new_id = cur.lastrowid
+    # 3. Insert mit Retry-Wrapper. IntegrityError fängt die Race-Condition,
+    #    falls zwei gleichzeitige Requests mit demselben Key beide den Pre-Check passieren.
+    try:
+        cur = execute_with_retry(
+            conn,
+            """
+            INSERT INTO playbooks
+                (skill_id, version, status, problem_domain, problem_description,
+                 approach, content, author_agent, metadata, idempotency_key)
+            VALUES (?, ?, 'candidate', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                submission.skill_id,
+                new_version,
+                submission.problem_domain,
+                submission.problem_description,
+                submission.approach,
+                submission.content,
+                submission.author_agent,
+                metadata_json,
+                submission.idempotency_key,
+            ),
+        )
+    except sqlite3.IntegrityError as e:
+        if submission.idempotency_key and "idempotency_key" in str(e).lower():
+            existing = conn.execute(
+                "SELECT id, skill_id, version, status FROM playbooks WHERE idempotency_key = ?",
+                (submission.idempotency_key,),
+            ).fetchone()
+            if existing:
+                return CandidateResponse(
+                    id=existing["id"],
+                    skill_id=existing["skill_id"],
+                    version=existing["version"],
+                    status=existing["status"],
+                    idempotent_replay=True,
+                )
+        raise HTTPException(status_code=409, detail=f"Integrity error: {e}")
 
+    new_id = cur.lastrowid
     logger.info(
         f"Kandidat eingereicht: id={new_id} skill_id={submission.skill_id} "
         f"version={new_version} author={submission.author_agent}"
@@ -197,6 +280,7 @@ def submit_candidate(
         skill_id=submission.skill_id,
         version=new_version,
         status="candidate",
+        idempotent_replay=False,
     )
 
 
@@ -284,28 +368,60 @@ def record_validation(
     conn: sqlite3.Connection = Depends(get_db),
 ):
     """Ein Agent meldet zurück: das Playbook hat funktioniert / nicht funktioniert."""
-    # Existenz prüfen
+    # 1. Idempotenz-Check vor allem anderen — auch vor 404, damit ein erfolgreich
+    #    geschriebener Replay konsistent dieselbe Antwort liefert.
+    if validation.idempotency_key:
+        existing = conn.execute(
+            "SELECT id, playbook_id FROM validations WHERE idempotency_key = ?",
+            (validation.idempotency_key,),
+        ).fetchone()
+        if existing:
+            return ValidationResponse(
+                id=existing["id"],
+                playbook_id=existing["playbook_id"],
+                recorded=True,
+                idempotent_replay=True,
+            )
+
+    # 2. Playbook-Existenz prüfen.
     exists = conn.execute("SELECT 1 FROM playbooks WHERE id = ?", (playbook_id,)).fetchone()
     if not exists:
         raise HTTPException(status_code=404, detail=f"Playbook {playbook_id} nicht gefunden")
 
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO validations
-            (playbook_id, validator_agent, success, latency_ms, model_used, notes)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (
-            playbook_id,
-            validation.validator_agent,
-            validation.success,
-            validation.latency_ms,
-            validation.model_used,
-            validation.notes,
-        ),
-    )
-    conn.commit()
+    # 3. Insert mit Retry. IntegrityError fängt parallele Race auf gleichem Key.
+    try:
+        cur = execute_with_retry(
+            conn,
+            """
+            INSERT INTO validations
+                (playbook_id, validator_agent, success, latency_ms, model_used, notes,
+                 idempotency_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                playbook_id,
+                validation.validator_agent,
+                validation.success,
+                validation.latency_ms,
+                validation.model_used,
+                validation.notes,
+                validation.idempotency_key,
+            ),
+        )
+    except sqlite3.IntegrityError as e:
+        if validation.idempotency_key and "idempotency_key" in str(e).lower():
+            existing = conn.execute(
+                "SELECT id, playbook_id FROM validations WHERE idempotency_key = ?",
+                (validation.idempotency_key,),
+            ).fetchone()
+            if existing:
+                return ValidationResponse(
+                    id=existing["id"],
+                    playbook_id=existing["playbook_id"],
+                    recorded=True,
+                    idempotent_replay=True,
+                )
+        raise HTTPException(status_code=409, detail=f"Integrity error: {e}")
 
     logger.info(
         f"Validation aufgezeichnet: playbook_id={playbook_id} "
@@ -316,6 +432,7 @@ def record_validation(
         id=cur.lastrowid,
         playbook_id=playbook_id,
         recorded=True,
+        idempotent_replay=False,
     )
 
 
@@ -337,11 +454,11 @@ def promote_playbook(
             detail=f"Playbook {playbook_id} hat status='{row['status']}', kann nicht promotet werden",
         )
 
-    conn.execute(
+    execute_with_retry(
+        conn,
         "UPDATE playbooks SET status='verified', promoted_at=CURRENT_TIMESTAMP WHERE id = ?",
         (playbook_id,),
     )
-    conn.commit()
 
     promoted_row = conn.execute(
         "SELECT id, skill_id, version, status, promoted_at FROM playbooks WHERE id = ?",

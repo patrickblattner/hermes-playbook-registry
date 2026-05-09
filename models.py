@@ -16,6 +16,9 @@ class CandidateSubmission(BaseModel):
     content: str = Field(..., min_length=1)
     author_agent: str = Field(..., min_length=1, max_length=100)
     metadata: dict[str, Any] | None = None
+    # Optional: bei wiederholtem Submit mit gleichem Key → kein Doppel-Insert,
+    # sondern Replay der ursprünglichen Antwort. Empfohlen: UUIDv4 vom Agenten.
+    idempotency_key: str | None = Field(None, max_length=200)
 
 
 class CandidateResponse(BaseModel):
@@ -23,6 +26,8 @@ class CandidateResponse(BaseModel):
     skill_id: str
     version: int
     status: str
+    # True wenn die Antwort aus einem idempotenten Replay stammt (Eintrag existierte schon).
+    idempotent_replay: bool = False
 
 
 # ---------- Validation ----------
@@ -33,12 +38,14 @@ class ValidationSubmission(BaseModel):
     latency_ms: int | None = None
     model_used: str | None = None
     notes: str | None = None
+    idempotency_key: str | None = Field(None, max_length=200)
 
 
 class ValidationResponse(BaseModel):
     id: int
     playbook_id: int
     recorded: bool
+    idempotent_replay: bool = False
 
 
 # ---------- Playbook (vollständig) ----------

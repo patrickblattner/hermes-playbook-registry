@@ -19,13 +19,19 @@ CREATE TABLE IF NOT EXISTS playbooks (
     author_agent        TEXT NOT NULL,
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     promoted_at         TIMESTAMP,
-    metadata            TEXT,  -- JSON als String gespeichert
+    metadata            TEXT,                -- JSON als String gespeichert
+    idempotency_key     TEXT,                -- vom Client, optional, für sichere Retries
     UNIQUE(skill_id, version)
 );
 
 CREATE INDEX IF NOT EXISTS idx_playbooks_status ON playbooks(status);
 CREATE INDEX IF NOT EXISTS idx_playbooks_skill_id ON playbooks(skill_id);
 CREATE INDEX IF NOT EXISTS idx_playbooks_domain ON playbooks(problem_domain);
+
+-- Partial Unique Index: blockt Doppel-Inserts mit gleichem Key, lässt aber
+-- mehrere Inserts mit idempotency_key=NULL zu.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_playbooks_idem
+    ON playbooks(idempotency_key) WHERE idempotency_key IS NOT NULL;
 
 -- Validierungs-Events
 CREATE TABLE IF NOT EXISTS validations (
@@ -37,11 +43,14 @@ CREATE TABLE IF NOT EXISTS validations (
     model_used      TEXT,
     notes           TEXT,
     validated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    idempotency_key TEXT,
     FOREIGN KEY (playbook_id) REFERENCES playbooks(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_validations_playbook ON validations(playbook_id);
 CREATE INDEX IF NOT EXISTS idx_validations_agent ON validations(validator_agent);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_validations_idem
+    ON validations(idempotency_key) WHERE idempotency_key IS NOT NULL;
 
 -- Volltextsuche via FTS5
 -- content=''playbooks'' macht es zu einer "external content" Tabelle:
