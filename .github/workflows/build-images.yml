@@ -25,11 +25,13 @@ jobs:
           cache: pip
 
       - name: Install dependencies
+        # Eine einzige pip-Invocation, sodass der Resolver die Schnittmenge
+        # aller drei Requirement-Files findet. Sequenzielle Installs upgraden
+        # sonst transitive Deps (z.B. starlette → 1.0 wegen sse-starlette),
+        # was fastapi 0.115's interne `Router(on_startup=…)` Nutzung bricht.
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r mcp-server/requirements.txt
-          pip install -r tests/requirements.txt
+          pip install -r requirements.txt -r mcp-server/requirements.txt -r tests/requirements.txt
 
       - name: Run pytest
         run: python -m pytest tests/ -v
