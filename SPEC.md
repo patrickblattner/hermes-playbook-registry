@@ -351,7 +351,7 @@ Ein gemeinsames Network `hermes-net`. Volume `playbook-data` für Persistenz.
    Concurrency + Wilson + STDIO-MCP). DB-Migrationen via `migrations/` mit
    `_migrations`-Tracking. Online-Backup/Restore via Skripte. Healthcheck-
    Probe. GitHub-Actions baut Multi-Arch-Images (linux/amd64,arm64) zu GHCR.
-   Pre-built Images via `setup.sh` als One-shot-Installer.
+   Pre-built Images via `deploy.sh` als One-shot-Installer.
 
 ## MCP-Wrapper (Phase 7)
 

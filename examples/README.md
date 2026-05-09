@@ -10,7 +10,7 @@ Compose-Konfigurationen, verbunden über das gemeinsame Bridge-Network
 ```
         ┌─────────────────── Docker host ───────────────────┐
         │                                                   │
-        │   Registry-Stack (setup.sh)                       │
+        │   Registry-Stack (deploy.sh)                       │
         │   ┌────────────────────────────────────────┐     │
         │   │ playbook-registry        :8000  (REST) │     │
         │   │ playbook-registry-mcp    :8001  (MCP)  │     │
@@ -35,7 +35,7 @@ Compose-Konfigurationen, verbunden über das gemeinsame Bridge-Network
 
 ```bash
 # 1. Registry-Stack hochziehen (legt hermes-net an, startet REST + MCPs)
-curl -fsSL https://raw.githubusercontent.com/patrickblattner/hermes-playbook-registry/main/setup.sh | bash
+curl -fsSL https://raw.githubusercontent.com/patrickblattner/hermes-playbook-registry/main/deploy.sh | bash
 
 # 2. Agent-Stack starten (hängt sich ins existierende hermes-net)
 cp hermes-agent-stack.yml ~/my-agents/docker-compose.yml

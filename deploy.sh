@@ -1,31 +1,35 @@
 #!/bin/bash
-# Hermes Playbook Registry — One-shot Installer.
+# Hermes Playbook Registry — One-shot Deploy.
 #
 # Lädt die Compose-Definition (inline) ins INSTALL_DIR, zieht die Images von
 # ghcr.io, startet den Stack, wartet auf den Healthcheck. Idempotent — kann
 # mehrfach laufen, fungiert dann als Update (pull + up -d recreated nur
 # Container deren Image sich verändert hat).
 #
-# Quick-Start:
-#   curl -fsSL https://raw.githubusercontent.com/patrickblattner/hermes-playbook-registry/main/setup.sh | bash
+# Quick-Start (legt ein Unterverzeichnis im aktuellen Pfad an):
+#   curl -fsSL https://raw.githubusercontent.com/patrickblattner/hermes-playbook-registry/main/deploy.sh | bash
 #
 # Oder explizit:
-#   INSTALL_DIR=/opt/hermes-playbook-registry REGISTRY_TAG=latest bash setup.sh
+#   INSTALL_DIR=/opt/hermes-playbook-registry REGISTRY_TAG=latest bash deploy.sh
 #
 # Variablen:
-#   INSTALL_DIR     Wo die compose.yml und Daten landen (Default: ~/hermes-playbook-registry)
-#   REGISTRY_TAG    Welches Image-Tag pullen (Default: latest)
+#   INSTALL_DIR     Wo die compose.yml und Daten landen.
+#                   Default: <PWD>/hermes-playbook-registry — also ein
+#                   Unterverzeichnis im aktuellen Pfad. Wenn du z.B. in
+#                   ~/Docker/ stehst, wird ~/Docker/hermes-playbook-registry/
+#                   angelegt.
+#   REGISTRY_TAG    Image-Tag (Default: latest)
 #   GHCR_USER       GitHub-Username für ghcr.io login (nur falls Image privat)
 #   GHCR_TOKEN      GitHub-PAT mit read:packages (nur falls Image privat)
 
 set -euo pipefail
 
-INSTALL_DIR="${INSTALL_DIR:-$HOME/hermes-playbook-registry}"
+INSTALL_DIR="${INSTALL_DIR:-$PWD/hermes-playbook-registry}"
 REGISTRY_TAG="${REGISTRY_TAG:-latest}"
 GHCR_USER="${GHCR_USER:-}"
 GHCR_TOKEN="${GHCR_TOKEN:-}"
 
-log() { printf "\033[1;34m[setup]\033[0m %s\n" "$*"; }
+log() { printf "\033[1;34m[deploy]\033[0m %s\n" "$*"; }
 ok()  { printf "\033[1;32m[ ok ]\033[0m %s\n" "$*"; }
 err() { printf "\033[1;31m[fail]\033[0m %s\n" "$*" >&2; }
 
@@ -159,7 +163,7 @@ Hermes Playbook Registry läuft.
   Online-Backup:   docker exec playbook-registry /app/scripts/backup.sh
 
   Logs:            docker compose -f $INSTALL_DIR/docker-compose.yml logs -f
-  Update:          INSTALL_DIR=$INSTALL_DIR bash setup.sh
+  Update:          INSTALL_DIR=$INSTALL_DIR bash deploy.sh
   Stop:            docker compose -f $INSTALL_DIR/docker-compose.yml down
   Stop + Daten:    docker compose -f $INSTALL_DIR/docker-compose.yml down -v
 

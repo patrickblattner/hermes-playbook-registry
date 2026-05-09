@@ -5,7 +5,7 @@ Backend: SQLite mit WAL-Mode und FTS5-Volltextsuche. Keine externen Abhängigkei
 
 ## Installation
 
-### Empfohlen: Pre-built Images via Setup-Skript
+### Empfohlen: Pre-built Images via Deploy-Skript
 
 Pre-built Multi-Arch-Images (linux/amd64, linux/arm64) liegen auf
 [ghcr.io](https://github.com/patrickblattner?tab=packages). Ein einziges
@@ -13,7 +13,11 @@ Skript zieht die Images, schreibt das `docker-compose.yml`, legt das
 gemeinsame Network `hermes-net` an und startet alles:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/patrickblattner/hermes-playbook-registry/main/setup.sh | bash
+# Wechsle vorher in das Verzeichnis, in dem das Projekt-Unterverzeichnis
+# entstehen soll (z.B. ~/Docker), dann:
+cd ~/Docker
+curl -fsSL https://raw.githubusercontent.com/patrickblattner/hermes-playbook-registry/main/deploy.sh | bash
+# → ~/Docker/hermes-playbook-registry/  wird angelegt
 ```
 
 Das ist der bevorzugte Weg — kein Source-Klon, kein lokaler Build, kein
@@ -22,36 +26,36 @@ Image-Bau. Idempotent: nochmal laufen aktualisiert auf den neuesten
 
 **Konfigurations-ENV (alle optional):**
 
-| Variable        | Default                              | Zweck                                       |
-|-----------------|--------------------------------------|---------------------------------------------|
-| `INSTALL_DIR`   | `$HOME/hermes-playbook-registry`     | Wo `docker-compose.yml` und Daten landen    |
-| `REGISTRY_TAG`  | `latest`                             | Welches Image-Tag pullen (z.B. `v1.0`, sha) |
-| `GHCR_USER`     | —                                    | GitHub-Username (nur falls Images privat)   |
-| `GHCR_TOKEN`    | —                                    | PAT mit `read:packages` (nur falls privat)  |
+| Variable        | Default                                | Zweck                                                                       |
+|-----------------|----------------------------------------|-----------------------------------------------------------------------------|
+| `INSTALL_DIR`   | `$PWD/hermes-playbook-registry`        | Wo `docker-compose.yml` und Daten landen (Default: Unterverzeichnis im aktuellen Pfad) |
+| `REGISTRY_TAG`  | `latest`                               | Welches Image-Tag pullen (z.B. `v1.0`, sha)                                |
+| `GHCR_USER`     | —                                      | GitHub-Username (nur falls Images privat)                                  |
+| `GHCR_TOKEN`    | —                                      | PAT mit `read:packages` (nur falls privat)                                 |
 
 ```bash
-# Beispiel: anderer Pfad, fixiertes Tag
-INSTALL_DIR=/opt/hermes-playbook-registry REGISTRY_TAG=latest bash setup.sh
+# Beispiel: festes absolutes Ziel + fixiertes Tag
+INSTALL_DIR=/opt/hermes-playbook-registry REGISTRY_TAG=latest bash deploy.sh
 ```
 
 **Stop / Update / Cleanup:**
 
 ```bash
-cd ~/hermes-playbook-registry
+cd <dein-INSTALL_DIR>                                   # z.B. ~/Docker/hermes-playbook-registry
 docker compose logs -f                                  # Logs
 docker compose down                                     # stoppen, Daten bleiben
 docker compose down -v                                  # stoppen + Daten weg
-INSTALL_DIR=~/hermes-playbook-registry bash setup.sh    # update auf :latest
+INSTALL_DIR=$(pwd) bash deploy.sh                       # update auf :latest
 ```
 
 **Wichtige Hinweise:**
 
-- `setup.sh` legt das Bridge-Network `hermes-net` einmal pro Host an. Externe
+- `deploy.sh` legt das Bridge-Network `hermes-net` einmal pro Host an. Externe
   Agent-Stacks hängen sich danach via `external: true` ins selbe Network —
   siehe [Architektur / Network-Setup](#network-setup-für-mehrere-agent-stacks)
   und `examples/hermes-agent-stack.yml`.
 - Beide GHCR-Packages müssen einmalig nach dem ersten Build auf `public`
-  gestellt werden (sonst braucht `setup.sh` die `GHCR_*`-Variablen). Direktlink:
+  gestellt werden (sonst braucht `deploy.sh` die `GHCR_*`-Variablen). Direktlink:
   `https://github.com/users/patrickblattner/packages/container/hermes-playbook-registry/settings`
 
 ### Alternative: aus dem Source-Tree bauen
@@ -97,7 +101,7 @@ Coverage:
 ```
         ┌───────────────────── Docker host ───────────────────────┐
         │                                                         │
-        │  Registry-Stack (setup.sh)                              │
+        │  Registry-Stack (deploy.sh)                              │
         │  ┌──────────────────────────────────────────────┐       │
         │  │ playbook-registry      :8000  (REST/FTS5)    │       │
         │  │ playbook-registry-mcp  :8001  (MCP)          │       │
@@ -136,7 +140,7 @@ Compose-Stacks** auf demselben Docker-Host (Agenten haben oft eigene
 Bauch-Konfiguration). Verbunden werden sie über ein gemeinsames Bridge-
 Network mit festem Namen `hermes-net`:
 
-- `setup.sh` legt das Network einmalig an (`docker network create hermes-net`).
+- `deploy.sh` legt das Network einmalig an (`docker network create hermes-net`).
 - Der Registry-Compose deklariert es als `external: true; name: hermes-net`.
 - Jeder Agent-Stack deklariert es identisch und hängt seine Container rein.
 - **Kein Port-Mapping nach außen** — die Registry ist ausschließlich aus
@@ -160,7 +164,7 @@ Konkretes Beispiel siehe `examples/hermes-agent-stack.yml` und
 
 ```bash
 # 1. Registry-Stack (legt hermes-net an)
-curl -fsSL https://raw.githubusercontent.com/patrickblattner/hermes-playbook-registry/main/setup.sh | bash
+curl -fsSL https://raw.githubusercontent.com/patrickblattner/hermes-playbook-registry/main/deploy.sh | bash
 
 # 2. Agent-Stack (referenziert hermes-net als external)
 cd ~/my-hermes-agents/
@@ -429,14 +433,14 @@ PRAGMA journal_mode;
 | `MCP_PORT`              | `8001`                             | Port für streamable-http-Modus                                           |
 | `DEFAULT_AGENT_ID`      | `anonymous`                        | Fallback-Identität wenn `as_agent` im Tool-Call leer ist (Single-Agent)  |
 
-### Setup-Skript (`setup.sh`)
+### Deploy-Skript (`deploy.sh`)
 
-| Variable        | Default                              | Zweck                                       |
-|-----------------|--------------------------------------|---------------------------------------------|
-| `INSTALL_DIR`   | `$HOME/hermes-playbook-registry`     | Wo `docker-compose.yml` und Daten landen    |
-| `REGISTRY_TAG`  | `latest`                             | Image-Tag (z.B. `v1.0`, sha)                |
-| `GHCR_USER`     | —                                    | GitHub-Username (nur falls Images privat)   |
-| `GHCR_TOKEN`    | —                                    | PAT mit `read:packages` (nur falls privat)  |
+| Variable        | Default                                | Zweck                                                       |
+|-----------------|----------------------------------------|-------------------------------------------------------------|
+| `INSTALL_DIR`   | `$PWD/hermes-playbook-registry`        | Wo `docker-compose.yml` und Daten landen (Unterverzeichnis im aktuellen Pfad) |
+| `REGISTRY_TAG`  | `latest`                               | Image-Tag (z.B. `v1.0`, sha)                                |
+| `GHCR_USER`     | —                                      | GitHub-Username (nur falls Images privat)                   |
+| `GHCR_TOKEN`    | —                                      | PAT mit `read:packages` (nur falls privat)                  |
 
 ### Operations-Skripte (`scripts/`)
 
@@ -520,7 +524,7 @@ neue Mitleser:
 5. **Phase 5**: `docker-compose.yml` finalisieren + Network testen.
 6. **Phase 6**: Lifecycle und Bewertung — Wilson-Score-Ranking, Auto-Promote, Auto-Demote, Auto-Archive älterer Versionen.
 7. **Phase 7**: MCP-Wrapper über die REST-API — agent-natives Interface.
-8. **Phase 8**: Production-Readiness — pytest-Suite, Migrations-Tracking, Backup/Restore/Healthcheck-Skripte, GitHub-Actions-Build, pre-built Images via GHCR, `setup.sh` als One-shot-Installer.
+8. **Phase 8**: Production-Readiness — pytest-Suite, Migrations-Tracking, Backup/Restore/Healthcheck-Skripte, GitHub-Actions-Build, pre-built Images via GHCR, `deploy.sh` als One-shot-Installer.
 9. **Phase 9**: Single MCP-Container statt einer pro Agent (`as_agent`-Parameter pro Tool-Call), `python:3.12-slim` als Base (Image 1.67 GB → 290 MB), `.dockerignore`, GHA-paths-Whitelist, Test-Suite auf 59 Tests inkl. MCP-E2E ausgebaut.
 10. **Phase 10** (separat, nicht Teil dieses Repos): Hermes-Skills `consult-playbook-registry` und `submit-playbook-candidate` in den Agenten implementieren.
 

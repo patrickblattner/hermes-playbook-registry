@@ -5,7 +5,7 @@ on:
     branches: [main]
     tags: ["v*"]
     # Whitelist: nur Files, die wirklich ins Image gehen oder Tests beeinflussen,
-    # triggern den Workflow. Alles andere (setup.sh, docker-compose*.yml,
+    # triggern den Workflow. Alles andere (deploy.sh, docker-compose*.yml,
     # README.md, SPEC.md, examples/, LICENSE …) löst KEINEN Build aus.
     paths:
       - "Dockerfile"

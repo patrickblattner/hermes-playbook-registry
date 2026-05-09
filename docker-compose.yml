@@ -80,7 +80,7 @@ volumes:
   # hermes-agent-2-data:
 
 networks:
-  # Shared bridge network. external: true — wird einmal pro Host vom setup.sh
+  # Shared bridge network. external: true — wird einmal pro Host vom deploy.sh
   # angelegt (oder manuell via `docker network create hermes-net`) und kann
   # von externen Stacks (Hermes-Agent-Container etc.) per `external: true`
   # mitbenutzt werden. Dadurch erreichen die Agenten REST + MCP-Wrapper über

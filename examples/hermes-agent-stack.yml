@@ -2,10 +2,10 @@
 #
 # Dieser Stack läuft auf demselben Docker-Host wie die Registry, aber als
 # eigene Compose-Konfiguration. Verbindung über das gemeinsame Bridge-
-# Network 'hermes-net' (vom Registry-Stack via setup.sh angelegt).
+# Network 'hermes-net' (vom Registry-Stack via deploy.sh angelegt).
 # Kein Port-Mapping nach außen — Agent erreicht Registry und MCP nur intern.
 #
-# Voraussetzung: 'hermes-net' existiert auf dem Host. Wird vom setup.sh des
+# Voraussetzung: 'hermes-net' existiert auf dem Host. Wird vom deploy.sh des
 # Registry-Stacks erstellt; manuell ginge auch:  docker network create hermes-net
 #
 # Verwendung:
