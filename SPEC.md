@@ -345,6 +345,39 @@ Ein gemeinsames Network `hermes-net`. Volume `playbook-data` für Persistenz.
 5. **Phase 5**: docker-compose.yml fertig + Network testen.
 6. **Phase 6**: Lifecycle und Bewertung — Wilson-Score-Ranking, Auto-Promote (Cross-
    Validation), Auto-Demote bei Drift, Auto-Archive älterer Versionen.
+7. **Phase 7**: MCP-Wrapper als zweiter Container im hermes-net. Tool-Mapping
+   1:1 auf REST. Agent-Identität wird serverseitig aus `AGENT_ID` befüllt.
+
+## MCP-Wrapper (Phase 7)
+
+Der MCP-Wrapper ist ein dünner Adapter über der REST-API: er macht die Registry
+für agent-native Konsumenten via MCP-Tools verfügbar, hält selbst keinen State,
+und mappt jeden Tool-Call auf einen REST-Call. REST bleibt die Source of Truth.
+
+### Tool-Mapping
+
+| MCP-Tool                                                      | REST-Endpoint                                       |
+|---------------------------------------------------------------|-----------------------------------------------------|
+| `search_skills(query, status?, limit?)`                       | `GET /playbooks/search`                             |
+| `get_skill(playbook_id)`                                      | `GET /playbooks/{id}`                               |
+| `list_skill_versions(skill_id)`                               | `GET /playbooks/by-skill/{skill_id}/versions`       |
+| `publish_skill(skill_id, ..., metadata_json?)`                | `POST /playbooks/candidate`                         |
+| `rate_skill(playbook_id, success, latency_ms?, ...)`          | `POST /playbooks/{id}/validate`                     |
+| `promote_skill(playbook_id)`                                  | `POST /playbooks/{id}/promote`                      |
+
+### Identität / Trust
+
+`author_agent` und `validator_agent` werden vom MCP-Server aus `AGENT_ID` (ENV)
+befüllt — Clients können sich nicht selbst eine andere Identität geben. Pro
+Agent ein Wrapper-Container mit eigener `AGENT_ID`, oder STDIO-Modus als
+In-Process-Subprocess des Agenten.
+
+### Transports
+
+- `MCP_TRANSPORT=stdio` (Default in `server.py`): klassisch als Subprocess vom
+  Agenten gestartet. Empfehlung für Hermes/Hermine-Integration via Claude-Config.
+- `MCP_TRANSPORT=http`: streamable-http auf `MCP_PORT` (Default 8001). Empfohlen
+  für Container-Deployment im hermes-net. Pfad: `http://playbook-registry-mcp-<agent>:8001/mcp`.
 
 ## Out of Scope (bewusst)
 

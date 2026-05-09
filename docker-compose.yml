@@ -17,11 +17,49 @@ services:
     # ports:
     #   - "127.0.0.1:8080:8000"
 
+  # ---- MCP-Wrapper (Phase 7) ----
+  # Dünner Adapter: macht die REST-Registry über MCP-Tools für agent-native
+  # Konsumenten verfügbar. Pro Agent ein Wrapper-Container, damit AGENT_ID
+  # serverseitig fest ist und der Client die Identität nicht fälschen kann.
+  # Alternative: STDIO-Modus (MCP_TRANSPORT=stdio), siehe README.
+
+  playbook-registry-mcp-hermes:
+    build: ./mcp-server
+    container_name: playbook-registry-mcp-hermes
+    restart: unless-stopped
+    depends_on:
+      - playbook-registry
+    networks:
+      - hermes-net
+    environment:
+      - PLAYBOOK_REGISTRY_URL=http://playbook-registry:8000
+      - AGENT_ID=hermes
+      - MCP_TRANSPORT=http
+      - MCP_PORT=8001
+    # Standardmäßig kein Port-Mapping; nur intern via http://playbook-registry-mcp-hermes:8001
+    # ports:
+    #   - "127.0.0.1:8001:8001"
+
+  # Beispiel für einen zweiten Agent (Hermine). Aktivieren bei Bedarf.
+  # playbook-registry-mcp-hermine:
+  #   build: ./mcp-server
+  #   container_name: playbook-registry-mcp-hermine
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - playbook-registry
+  #   networks:
+  #     - hermes-net
+  #   environment:
+  #     - PLAYBOOK_REGISTRY_URL=http://playbook-registry:8000
+  #     - AGENT_ID=hermine
+  #     - MCP_TRANSPORT=http
+  #     - MCP_PORT=8001
+
   # ---- Platzhalter für deine Agenten ----
   # Anpassen an dein tatsächliches Hermes-Setup. Wichtig sind nur:
   #   - im selben Network (hermes-net)
-  #   - PLAYBOOK_REGISTRY_URL gesetzt
-  #   - AGENT_ID eindeutig
+  #   - PLAYBOOK_REGISTRY_URL (REST direkt) ODER
+  #   - MCP-Server als Tool registriert (siehe oben)
 
   # hermes-agent-1:
   #   image: dein-hermes-image:latest

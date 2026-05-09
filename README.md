@@ -58,6 +58,44 @@ Default-Annahme: die neueste verified-Version gewinnt. Skills, die niemand zweit
 nutzt, bleiben dauerhaft `candidate` — die Registry verspricht Qualität, nicht
 Vollständigkeit.
 
+## MCP-Wrapper
+
+Zusätzlich zur REST-API gibt es einen dünnen MCP-Adapter (`mcp-server/`), der
+die Registry agent-nativ verfügbar macht. REST bleibt Source of Truth.
+
+```
+┌──────────────┐  MCP   ┌──────────────────┐  HTTP   ┌─────────────────┐
+│ Hermes-Agent ├───────▶│  mcp-wrapper     ├────────▶│ playbook-       │
+└──────────────┘        │  (FastMCP,       │         │ registry (REST) │
+┌──────────────┐  MCP   │   AGENT_ID env)  │         │                 │
+│ Hermine      ├───────▶└──────────────────┘         └─────────────────┘
+└──────────────┘
+```
+
+Tool-Liste: `search_skills`, `get_skill`, `list_skill_versions`,
+`publish_skill`, `rate_skill`, `promote_skill`.
+
+`author_agent` und `validator_agent` kommen serverseitig aus der ENV `AGENT_ID`
+des MCP-Containers — der Client kann seine Identität nicht fälschen.
+
+### Modi
+
+- **STDIO** (Empfehlung für In-Process-Nutzung): in der Claude-Config des Agenten
+  registrieren mit `command="python", args=["mcp-server/server.py"], env={AGENT_ID, PLAYBOOK_REGISTRY_URL}`.
+- **HTTP** (für Container-Deployment, Default in `docker-compose.yml`): MCP-Wrapper
+  läuft als eigener Service im `hermes-net` und exponiert `streamable-http` auf
+  Port 8001. Andere Container reden via `http://playbook-registry-mcp-<agent>:8001/mcp`.
+
+### Aktivieren
+
+```bash
+docker compose up -d --build  # bringt registry + mcp-hermes hoch
+```
+
+Für einen zweiten Agent (Hermine): den auskommentierten Block in
+`docker-compose.yml` aktivieren oder einen weiteren Container mit anderer
+`AGENT_ID` starten.
+
 ## Schneller Start
 
 ```bash
@@ -209,7 +247,8 @@ def submit_candidate(payload, max_retries=3):
 5. **Phase 5**: `docker-compose.yml` finalisieren + Network testen.
 6. **Phase 6**: Lifecycle und Bewertung — Wilson-Score-Ranking, Auto-Promote,
    Auto-Demote, Auto-Archive älterer Versionen.
-7. **Phase 7** (separat): Hermes-Skills `consult-playbook-registry` und
+7. **Phase 7**: MCP-Wrapper über die REST-API — agent-natives Interface.
+8. **Phase 8** (separat): Hermes-Skills `consult-playbook-registry` und
    `submit-playbook-candidate` in den Agenten implementieren.
 
 ## Bewusst ausgeklammert (für später)
