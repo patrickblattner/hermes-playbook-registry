@@ -48,6 +48,19 @@ fi
 
 ok "docker $(docker --version | awk '{print $3}' | tr -d ',') verfügbar"
 
+# --- 1b. Shared Network anlegen ---------------------------------------------
+# Externe Hermes-Agenten-Stacks hängen sich auch in dieses Network. Wir nutzen
+# einen festen Namen (hermes-net) statt das compose-Prefix, damit andere Stacks
+# es per external: true einfach referenzieren können.
+
+if ! docker network inspect hermes-net >/dev/null 2>&1; then
+    log "Lege Docker-Netzwerk 'hermes-net' an ..."
+    docker network create hermes-net >/dev/null
+    ok "hermes-net erstellt"
+else
+    ok "hermes-net existiert bereits"
+fi
+
 # --- 2. Install-Verzeichnis anlegen -----------------------------------------
 
 mkdir -p "$INSTALL_DIR"
@@ -66,8 +79,6 @@ services:
       - playbook-data:/data
     networks:
       - hermes-net
-    # ports:
-    #   - "127.0.0.1:8080:8000"
 
   playbook-registry-mcp-hermes:
     image: ghcr.io/patrickblattner/hermes-playbook-registry-mcp:${REGISTRY_TAG:-latest}
@@ -83,13 +94,28 @@ services:
       - MCP_TRANSPORT=http
       - MCP_PORT=8001
 
+  playbook-registry-mcp-hermine:
+    image: ghcr.io/patrickblattner/hermes-playbook-registry-mcp:${REGISTRY_TAG:-latest}
+    container_name: playbook-registry-mcp-hermine
+    restart: unless-stopped
+    depends_on:
+      - playbook-registry
+    networks:
+      - hermes-net
+    environment:
+      - PLAYBOOK_REGISTRY_URL=http://playbook-registry:8000
+      - AGENT_ID=hermine
+      - MCP_TRANSPORT=http
+      - MCP_PORT=8001
+
 volumes:
   playbook-data:
     driver: local
 
 networks:
   hermes-net:
-    driver: bridge
+    external: true
+    name: hermes-net
 YAML
 
 cat > .env <<EOF

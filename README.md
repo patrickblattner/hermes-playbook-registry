@@ -6,24 +6,67 @@ Backend: SQLite mit WAL-Mode und FTS5-Volltextsuche. Keine externen Abhängigkei
 ## Architektur
 
 ```
-┌─────────────┐     HTTP      ┌──────────────────────┐
-│  Agent 1    │ ─────────────▶│                      │
-└─────────────┘               │  Registry Service    │
-                              │  (FastAPI + SQLite)  │
-┌─────────────┐     HTTP      │                      │
-│  Agent 2    │ ─────────────▶│                      │
-└─────────────┘               └──────────────────────┘
-                                       │
-                                       ▼
-                              ┌──────────────────────┐
-                              │ /data/playbooks.db   │
-                              │ (Docker Volume)      │
-                              └──────────────────────┘
+        ┌───────────────────── Docker host ───────────────────────┐
+        │                                                         │
+        │  Registry-Stack (setup.sh)                              │
+        │  ┌──────────────────────────────────────────────┐       │
+        │  │ playbook-registry        :8000  (REST/FTS5)  │       │
+        │  │ playbook-registry-mcp-hermes   :8001  (MCP)  │       │
+        │  │ playbook-registry-mcp-hermine  :8001  (MCP)  │       │
+        │  └─────────────┬────────────────────────────────┘       │
+        │                │                                        │
+        │          hermes-net (bridge, kein Port-Mapping nach außen)
+        │                │                                        │
+        │  Agent-Stack (deine Compose, externer Stack)            │
+        │  ┌─────────────┴────────────────────────────────┐       │
+        │  │ hermes-agent-1   nutzt …mcp-hermes:8001/mcp  │       │
+        │  │ hermes-agent-2   nutzt …mcp-hermine:8001/mcp │       │
+        │  └──────────────────────────────────────────────┘       │
+        │                                                         │
+        └─────────────────────────────────────────────────────────┘
+                       ▼
+        ┌──────────────────────┐
+        │ /data/playbooks.db   │  (Docker Volume, WAL+FTS5)
+        └──────────────────────┘
 ```
 
-Promotion-Pipeline: Agent reicht **Kandidat** ein → andere Agenten **validieren** →
-manuelle/automatische **Promotion** zu *verified*. Erst `verified` Playbooks werden
-in der `consult`-Phase eines Agenten standardmäßig zurückgegeben.
+Drei Container im Registry-Stack: **REST-Service** + **zwei MCP-Wrapper**
+(einer pro Agent, mit jeweils eigener `AGENT_ID` als ENV — der Wrapper
+befüllt damit `author_agent`/`validator_agent` serverseitig, sodass kein
+Client sich eine fremde Identität geben kann).
+
+Promotion-Pipeline: Agent reicht **Kandidat** ein → andere Agenten
+**validieren** → automatische **Promotion** zu *verified* (Cross-Validation
++ Wilson-Score-Schwelle, siehe Lifecycle-Sektion). Erst `verified`-Playbooks
+werden in der Default-Search zurückgegeben.
+
+### Network-Setup für mehrere Agent-Stacks
+
+Die Registry und die Agenten laufen typischerweise als **getrennte
+Compose-Stacks** auf demselben Docker-Host (Agenten haben oft eigene
+Bauch-Konfiguration). Verbunden werden sie über ein gemeinsames Bridge-
+Network mit festem Namen `hermes-net`:
+
+- `setup.sh` legt das Network einmalig an (`docker network create hermes-net`).
+- Der Registry-Compose deklariert es als `external: true; name: hermes-net`.
+- Jeder Agent-Stack deklariert es identisch und hängt seine Container rein.
+- **Kein Port-Mapping nach außen** — die Registry ist ausschließlich aus
+  Containern im selben Network erreichbar. Genau die Isolation, die du willst.
+
+Konkretes Beispiel siehe `examples/hermes-agent-stack.yml` und
+`examples/README.md`. Die Reihenfolge ist immer:
+
+```bash
+# 1. Registry-Stack (legt hermes-net an)
+curl -fsSL https://raw.githubusercontent.com/patrickblattner/hermes-playbook-registry/main/setup.sh | bash
+
+# 2. Agent-Stack (referenziert hermes-net als external)
+cd ~/my-hermes-agents/
+docker compose up -d
+```
+
+`hermes-net` bleibt nach `docker compose down` bestehen — Stacks lassen
+sich unabhängig stoppen/starten ohne dass die Verbindung kaputtgeht.
 
 ## Robustheit
 

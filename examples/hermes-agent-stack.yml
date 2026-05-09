@@ -1,0 +1,62 @@
+# Beispiel-Compose für einen externen Hermes-Agent-Stack.
+#
+# Dieser Stack läuft auf demselben Docker-Host wie die Registry, aber als
+# eigene Compose-Konfiguration. Die Verbindung passiert ausschließlich über
+# das gemeinsame Bridge-Network 'hermes-net' (vom Registry-Stack via
+# setup.sh angelegt). Kein Port-Mapping nach außen — der Agent erreicht
+# Registry und MCP-Wrapper nur intern.
+#
+# Voraussetzung: 'hermes-net' existiert auf dem Host. Wird vom setup.sh des
+# Registry-Stacks erstellt; manuell ginge auch:  docker network create hermes-net
+#
+# Verwendung:
+#   cd examples/  (oder eigener Pfad)
+#   docker compose -f hermes-agent-stack.yml up -d
+#
+# Anpassen:
+#   - 'image:' auf dein tatsächliches Hermes-Image
+#   - AGENT_ID muss zu einem der MCP-Wrapper-Container im Registry-Stack
+#     passen (default: hermes oder hermine). Der Agent kommuniziert via
+#     PLAYBOOK_REGISTRY_URL direkt mit dem REST-Endpoint, oder über
+#     MCP_REGISTRY_URL via Wrapper-Container (empfohlen für Identity-Trennung).
+
+services:
+  hermes-agent-1:
+    image: dein-hermes-image:latest    # ANPASSEN
+    container_name: hermes-agent-1
+    restart: unless-stopped
+    networks:
+      - hermes-net
+    environment:
+      - AGENT_ID=hermes
+      # Variante A — Direkt REST (Agent setzt author_agent / validator_agent
+      # selbst im Body. Schnell, einfach, aber kein Identity-Schutz):
+      - PLAYBOOK_REGISTRY_URL=http://playbook-registry:8000
+      # Variante B — Via MCP-Wrapper (Empfohlen. Wrapper befüllt
+      # author_agent / validator_agent serverseitig aus seiner eigenen
+      # AGENT_ID-ENV. Client kann keine fremde Identität claimen):
+      - MCP_REGISTRY_URL=http://playbook-registry-mcp-hermes:8001/mcp
+    # volumes:
+    #   - hermes-agent-1-data:/root/.hermes
+
+  hermes-agent-2:
+    image: dein-hermes-image:latest    # ANPASSEN
+    container_name: hermes-agent-2
+    restart: unless-stopped
+    networks:
+      - hermes-net
+    environment:
+      - AGENT_ID=hermine
+      - PLAYBOOK_REGISTRY_URL=http://playbook-registry:8000
+      - MCP_REGISTRY_URL=http://playbook-registry-mcp-hermine:8001/mcp
+    # volumes:
+    #   - hermes-agent-2-data:/root/.hermes
+
+# volumes:
+#   hermes-agent-1-data:
+#   hermes-agent-2-data:
+
+networks:
+  hermes-net:
+    external: true
+    name: hermes-net
