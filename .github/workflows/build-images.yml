@@ -16,7 +16,6 @@ on:
       - "scripts/**"
       - "mcp-server/**"
       - "tests/**"
-      - ".github/workflows/build-images.yml"
   pull_request:
     branches: [main]
     paths:
@@ -28,7 +27,6 @@ on:
       - "scripts/**"
       - "mcp-server/**"
       - "tests/**"
-      - ".github/workflows/build-images.yml"
 
 permissions:
   contents: read
