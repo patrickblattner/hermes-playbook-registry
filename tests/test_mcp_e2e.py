@@ -114,6 +114,32 @@ def _list_payload(result) -> list:
 # ----- Single-Agent Lifecycle via STDIO -------------------------------------
 
 @pytest.mark.asyncio
+async def test_stdio_agent_guide_resource(rest_backend):
+    """
+    Der MCP-Wrapper exponiert AGENT_GUIDE.md als Resource. Agents können sie
+    über read_resource("playbook-registry://agent-guide") on-demand lesen,
+    ohne dass der Operator sie ihnen mitgeben muss.
+    """
+    async with asyncio.timeout(15):
+        async with stdio_client(_stdio_params(rest_backend)) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+
+                resources = await session.list_resources()
+                uris = {str(r.uri) for r in resources.resources}
+                assert "playbook-registry://agent-guide" in uris
+
+                guide = await session.read_resource("playbook-registry://agent-guide")
+                content = guide.contents[0]
+                assert content.mimeType == "text/markdown"
+                assert "Hermes Playbook Registry" in content.text
+                # Stichprobe der drei Aktionen
+                assert "search_skills" in content.text
+                assert "publish_skill" in content.text
+                assert "rate_skill" in content.text
+
+
+@pytest.mark.asyncio
 async def test_stdio_full_lifecycle_all_six_tools(rest_backend):
     """
     Eine komplette User-Story über STDIO: publish → list_versions → search →

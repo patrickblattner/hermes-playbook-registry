@@ -224,6 +224,12 @@ die Registry agent-nativ verfügbar macht. REST bleibt Source of Truth.
 Tool-Liste: `search_skills`, `get_skill`, `list_skill_versions`,
 `publish_skill`, `rate_skill`, `promote_skill`.
 
+Plus eine **MCP-Resource** `playbook-registry://agent-guide`: ein knapper
+Agent-Briefing-Text (wann/wie konsultieren, einreichen, raten). Agenten
+können den jederzeit on-demand mit `read_resource(...)` ziehen, sodass
+nicht jede Hermes-Instanz die Anleitung im System-Prompt mitschleppen
+muss. Source: [`mcp-server/AGENT_GUIDE.md`](mcp-server/AGENT_GUIDE.md).
+
 Die Schreib-Tools (`publish_skill`, `rate_skill`) nehmen einen optionalen
 `as_agent`-Parameter, der zur `author_agent` bzw. `validator_agent` im
 Registry-Datenmodell wird. Wenn `as_agent` leer bleibt, fällt der Server auf

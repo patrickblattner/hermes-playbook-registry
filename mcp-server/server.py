@@ -24,9 +24,12 @@ import json
 import logging
 import os
 import uuid
+from pathlib import Path
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+
+AGENT_GUIDE_PATH = Path(__file__).resolve().parent / "AGENT_GUIDE.md"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,6 +56,19 @@ def _new_idempotency_key() -> str:
 def _agent(as_agent: str) -> str:
     """Wähle Agent-ID: explicit Tool-Arg vor DEFAULT_AGENT_ID."""
     return as_agent.strip() or DEFAULT_AGENT_ID
+
+
+# ---------- Resource: Agent Guide (when/why to use the registry) ----------
+
+@mcp.resource(
+    "playbook-registry://agent-guide",
+    name="Hermes Playbook Registry — Agent Guide",
+    description="When and how an agent should consult, submit to, and rate the registry.",
+    mime_type="text/markdown",
+)
+def agent_guide() -> str:
+    """Live-served from AGENT_GUIDE.md beside this server file."""
+    return AGENT_GUIDE_PATH.read_text(encoding="utf-8")
 
 
 # ---------- Read tools ----------

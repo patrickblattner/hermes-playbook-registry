@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY server.py .
+COPY server.py AGENT_GUIDE.md ./
 
 # HTTP-Modus per Default — sinnvoll für Container-Deployment.
 # Für In-Process-Nutzung neben einem Claude-Agent: MCP_TRANSPORT=stdio setzen
