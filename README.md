@@ -66,14 +66,31 @@ docker network create hermes-net 2>/dev/null || true
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 ```
 
-Tests gegen den lokalen Code:
+Tests gegen den lokalen Code (59 Tests, ~5s):
 
 ```bash
 docker run --rm -v "$(pwd)":/app -w /app python:3.12 bash -c "
+  apt-get update -qq && apt-get install -y -qq sqlite3 >/dev/null
   pip install -q -r requirements.txt -r mcp-server/requirements.txt -r tests/requirements.txt
   python -m pytest tests/ -v
 "
 ```
+
+Coverage:
+
+| Datei                          | Was abgedeckt ist                                                |
+|--------------------------------|------------------------------------------------------------------|
+| `test_health.py`               | `/health` + Migrations-Marker                                    |
+| `test_wilson.py`               | Score-Werte (1/1, 9/10, 100/100, …) + Threshold-Konsistenz       |
+| `test_idempotency.py`          | Replay mit Original-Daten auch bei verändertem Body              |
+| `test_lifecycle.py`            | Auto-Promote / Auto-Demote / Auto-Archive älterer Versionen      |
+| `test_search.py`               | FTS5 OR/AND/Phrase, Wilson-Ranking, metadata-Roundtrip           |
+| `test_concurrency.py`          | TOCTOU-Promote, parallele Version-Submits, parallele Idem        |
+| `test_validation_errors.py`    | 404 / 409 / 422 für jeden Endpoint                               |
+| `test_migrations.py`           | Idempotenz + Upgrade-Pfad gegen Legacy-DB                        |
+| `test_scripts.py`              | `backup.sh` / `restore.sh` / `healthcheck.sh` als Subprocess     |
+| `test_mcp_stdio.py`            | STDIO Tool-Discovery + Argument-Schema                           |
+| `test_mcp_e2e.py`              | STDIO + HTTP roundtrip alle 6 Tools, Cross-Agent-Auto-Promote    |
 
 ## Architektur
 
@@ -123,7 +140,20 @@ Network mit festem Namen `hermes-net`:
 - Der Registry-Compose deklariert es als `external: true; name: hermes-net`.
 - Jeder Agent-Stack deklariert es identisch und hängt seine Container rein.
 - **Kein Port-Mapping nach außen** — die Registry ist ausschließlich aus
-  Containern im selben Network erreichbar. Genau die Isolation, die du willst.
+  Containern im selben Network erreichbar.
+
+Hinweis zu `external: true`: das heißt **nicht** "von außen erreichbar",
+sondern nur "wird außerhalb dieses Compose-Stacks gemanaged" (vom Host vor-
+angelegt statt von Compose selbst). Die Isolation ist exakt die gleiche wie
+bei einem stack-internen Netzwerk:
+
+| Wer kann auf REST/MCP zugreifen?     | Erlaubt? |
+|--------------------------------------|----------|
+| Container im `hermes-net`            | ✅       |
+| Andere Container auf demselben Host  | ❌       |
+| Der Host selbst (`localhost:8000`)   | ❌ (kein `ports:`-Mapping) |
+| Andere Maschinen im LAN              | ❌       |
+| Internet                             | ❌       |
 
 Konkretes Beispiel siehe `examples/hermes-agent-stack.yml` und
 `examples/README.md`. Die Reihenfolge ist immer:
@@ -278,6 +308,31 @@ curl $REG/playbooks/1
 curl $REG/playbooks/by-skill/gcp-auth-workload-identity/versions
 ```
 
+### Variante: gleicher Workflow über den MCP-Wrapper
+
+Statt `http://playbook-registry:8000` direkt anzusprechen, kann jeder Agent
+auch über `http://playbook-registry-mcp:8001/mcp` reden — Tool-Schemas werden
+von MCP-Clients automatisch entdeckt, und die Agent-Identität wird mit jedem
+Tool-Call als `as_agent` mitgegeben. Beispiel mit dem Python-MCP-SDK:
+
+```python
+from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.session import ClientSession
+
+async with streamablehttp_client("http://playbook-registry-mcp:8001/mcp") as (r, w, _):
+    async with ClientSession(r, w) as s:
+        await s.initialize()
+        await s.call_tool("publish_skill", {
+            "skill_id": "gcp-auth-wif",
+            "problem_domain": "gcp-authentication",
+            "problem_description": "...",
+            "approach": "WIF",
+            "content": "## Steps\n1. ...",
+            "as_agent": "hermes",
+        })
+        # ... rate_skill, search_skills, get_skill, list_skill_versions, promote_skill
+```
+
 ## Operations
 
 ### Backup (online, ohne Service-Stop)
@@ -359,28 +414,62 @@ PRAGMA journal_mode;
 
 ## Konfiguration
 
-### Registry-Service
+### Registry-Service (`playbook-registry`)
 
-| Variable           | Default              | Zweck                       |
-|--------------------|----------------------|-----------------------------|
-| `PLAYBOOK_DB_PATH` | `/data/playbooks.db` | Pfad zur SQLite-Datei       |
+| Variable           | Default              | Zweck                                       |
+|--------------------|----------------------|---------------------------------------------|
+| `PLAYBOOK_DB_PATH` | `/data/playbooks.db` | Pfad zur SQLite-Datei (Volume-mounted)      |
 
-### Agenten
+### MCP-Wrapper (`playbook-registry-mcp`)
 
-| Variable                | Beispiel                          | Zweck                  |
-|-------------------------|-----------------------------------|------------------------|
-| `PLAYBOOK_REGISTRY_URL` | `http://playbook-registry:8000`   | Registry-Service URL   |
-| `AGENT_ID`              | `agent-1`                         | Eindeutige Agent-ID    |
+| Variable                | Default                            | Zweck                                                                    |
+|-------------------------|------------------------------------|--------------------------------------------------------------------------|
+| `PLAYBOOK_REGISTRY_URL` | `http://playbook-registry:8000`    | Wo der MCP-Wrapper das REST-Backend findet                               |
+| `MCP_TRANSPORT`         | `stdio`                            | `stdio` oder `http` (Container-Default im Image: `http`)                 |
+| `MCP_PORT`              | `8001`                             | Port für streamable-http-Modus                                           |
+| `DEFAULT_AGENT_ID`      | `anonymous`                        | Fallback-Identität wenn `as_agent` im Tool-Call leer ist (Single-Agent)  |
+
+### Setup-Skript (`setup.sh`)
+
+| Variable        | Default                              | Zweck                                       |
+|-----------------|--------------------------------------|---------------------------------------------|
+| `INSTALL_DIR`   | `$HOME/hermes-playbook-registry`     | Wo `docker-compose.yml` und Daten landen    |
+| `REGISTRY_TAG`  | `latest`                             | Image-Tag (z.B. `v1.0`, sha)                |
+| `GHCR_USER`     | —                                    | GitHub-Username (nur falls Images privat)   |
+| `GHCR_TOKEN`    | —                                    | PAT mit `read:packages` (nur falls privat)  |
+
+### Operations-Skripte (`scripts/`)
+
+| Variable           | Default                  | Skript                  | Zweck                                          |
+|--------------------|--------------------------|-------------------------|------------------------------------------------|
+| `BACKUP_DIR`       | `/data/backups`          | `backup.sh`             | Wo Backups hingelegt werden                    |
+| `RETAIN`           | `24`                     | `backup.sh`             | Wieviele Backups behalten (Rotation)           |
+| `HEALTH_URL`       | `http://localhost:8000/health` | `healthcheck.sh`  | Endpoint, der gepingt wird                     |
+| `TIMEOUT`          | `5`                      | `healthcheck.sh`        | Sekunden bis curl aufgibt                      |
+
+### Agent-seitige ENV (Convention)
+
+Agents setzen typischerweise:
+
+| Variable                | Beispiel                                         | Zweck                                      |
+|-------------------------|--------------------------------------------------|--------------------------------------------|
+| `PLAYBOOK_REGISTRY_URL` | `http://playbook-registry:8000`                  | für REST-Direkt-Calls                      |
+| `MCP_REGISTRY_URL`      | `http://playbook-registry-mcp:8001/mcp`          | für MCP-Calls                              |
+| `AGENT_ID`              | `hermes`                                         | wird vom Agent-Code als `as_agent`/Body-Feld weitergereicht |
+
+`AGENT_ID` ist agent-internal — die Registry akzeptiert die Identität als `as_agent`-Tool-Parameter (MCP) bzw. `author_agent`/`validator_agent`-Body-Feld (REST).
 
 ## Empfehlung für Agent-seitige Implementierung
 
-Auf der Agent-Seite sollte der HTTP-Client:
+### REST direkt
+
+Wenn der Agent den HTTP-Client schon hat: REST direkt verwenden, mit drei
+einfachen Conventions:
 
 1. **Idempotency-Key generieren** (UUIDv4) bevor der Request gesendet wird
-2. **Bei Timeout/Connection-Error retryen** (max 3x, exponential backoff) mit *demselben* Key
+2. **Bei Timeout/Connection-Error retryen** (max 3×, exponential backoff) mit *demselben* Key
 3. **Client-Timeout setzen** (z.B. 10s) damit der Agent nicht endlos blockiert
 
-Beispiel (Python):
 ```python
 import httpx, uuid, time
 
@@ -398,37 +487,50 @@ def submit_candidate(payload, max_retries=3):
             time.sleep(2 ** attempt)
 ```
 
-## Phasen für die Implementierung mit Claude Code
+### Via MCP-Wrapper (empfohlen für Claude-Agenten)
 
-1. **Phase 1**: `schema.sql` + `Dockerfile` + `main.py` mit nur `/health`.
+Wenn der Agent ohnehin MCP-Tools spricht (Hermes/Hermine), den Wrapper als
+Tool-Server registrieren — dann gibt's Tool-Discovery automatisch und der
+Agent muss keine REST-Schemata pflegen:
+
+```python
+from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.session import ClientSession
+
+async def consult_registry(query: str):
+    async with streamablehttp_client(MCP_REGISTRY_URL) as (r, w, _):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            return await s.call_tool("search_skills", {"query": query})
+```
+
+Idempotency-Key wird vom Wrapper für jeden Schreib-Call automatisch
+generiert. `as_agent` muss der Aufrufer pro Tool-Call setzen (oder im
+Wrapper-Container `DEFAULT_AGENT_ID` als Fallback).
+
+## Entwicklungs-Historie
+
+Phasen-Reihenfolge, in der die Komponenten gebaut wurden — als Referenz für
+neue Mitleser:
+
+1. **Phase 1**: `Dockerfile` + `main.py` mit nur `/health`. Container baut + läuft.
 2. **Phase 2**: `POST /playbooks/candidate` + `GET /playbooks/search` mit Retry + Idempotenz.
 3. **Phase 3**: `POST /playbooks/{id}/validate` + `GET /playbooks/{id}` + `POST /playbooks/{id}/promote`.
 4. **Phase 4**: `GET /playbooks/by-skill/{skill_id}/versions`.
 5. **Phase 5**: `docker-compose.yml` finalisieren + Network testen.
-6. **Phase 6**: Lifecycle und Bewertung — Wilson-Score-Ranking, Auto-Promote,
-   Auto-Demote, Auto-Archive älterer Versionen.
+6. **Phase 6**: Lifecycle und Bewertung — Wilson-Score-Ranking, Auto-Promote, Auto-Demote, Auto-Archive älterer Versionen.
 7. **Phase 7**: MCP-Wrapper über die REST-API — agent-natives Interface.
-8. **Phase 8**: Production-Readiness — Tests (pytest), Migrations, Backup-Skripte,
-   GitHub-Actions-Build, pre-built Images via GHCR, `setup.sh` als One-shot-Installer.
-9. **Phase 9** (separat): Hermes-Skills `consult-playbook-registry` und
-   `submit-playbook-candidate` in den Agenten implementieren.
+8. **Phase 8**: Production-Readiness — pytest-Suite, Migrations-Tracking, Backup/Restore/Healthcheck-Skripte, GitHub-Actions-Build, pre-built Images via GHCR, `setup.sh` als One-shot-Installer.
+9. **Phase 9**: Single MCP-Container statt einer pro Agent (`as_agent`-Parameter pro Tool-Call), `python:3.12-slim` als Base (Image 1.67 GB → 290 MB), `.dockerignore`, GHA-paths-Whitelist, Test-Suite auf 59 Tests inkl. MCP-E2E ausgebaut.
+10. **Phase 10** (separat, nicht Teil dieses Repos): Hermes-Skills `consult-playbook-registry` und `submit-playbook-candidate` in den Agenten implementieren.
 
 ## Bewusst ausgeklammert (für später)
 
-- Authentication (Stub-Vorbereitung im Code)
-- Time-Decay über alte Validations (Skills altern bei Re-Use, nicht von selbst)
-- Embeddings/Vector Search (FTS5 reicht erstmal)
-- Backup/Restore (Litestream oder Cron-Job separat einrichten)
-- Web-UI
-- Persistent Queue (synchroner Write-Pfad ist robust genug)
-
-## Backup-Empfehlung
-
-Online-Backup ohne Service-Stop:
-
-```bash
-docker compose exec playbook-registry \
-  sqlite3 /data/playbooks.db ".backup /data/backup-$(date +%Y%m%d).db"
-```
+- **Authentication** (Stub-Vorbereitung im Code, jetzt nicht aktiv — Trust kommt aus dem `hermes-net`-Network)
+- **Time-Decay** über alte Validations (Skills altern bei Re-Use, nicht von selbst)
+- **Embeddings / Vector Search** (FTS5 reicht erstmal)
+- **Web-UI** (`/docs` Swagger reicht für Debugging)
+- **Persistent Queue** (synchroner Write-Pfad mit Idempotency + Retry ist robust genug für 2–10 Agenten)
+- **Multi-Replica / HA** (eine Instanz, ein Volume — für den geplanten Einsatzbereich ausreichend)
 
 Für continuous backup → [Litestream](https://litestream.io/) als Sidecar.
