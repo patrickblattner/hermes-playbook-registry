@@ -131,8 +131,99 @@ Mit Triggern (AFTER INSERT, AFTER UPDATE, AFTER DELETE) automatisch synchron mit
 
 ### View `playbook_stats`
 
-Aggregierte Validierungs-Statistiken pro Playbook (validation_count, success_rate,
-avg_latency_ms). Vereinfacht das Sortieren in der Search.
+Aggregierte Validierungs-Statistiken pro Playbook:
+- `validation_count`, `success_count`, `success_rate`, `avg_latency_ms`
+- `external_success_count` — nur Validations mit `validator_agent != author_agent`
+  (Cross-Validation-Grundlage, siehe Lifecycle-Regeln)
+- `distinct_validators`
+
+Plus die SQL-Funktion `wilson_lower(success_count, validation_count)` (per
+`conn.create_function` registriert), die das untere 95%-Konfidenzintervall der
+wahren Erfolgsrate liefert. Sortierungs- und Lifecycle-Schwellen gehen darüber,
+nicht über die rohe `success_rate`.
+
+## Lifecycle und Bewertung
+
+Die Registry verspricht **Qualität**, nicht Vollständigkeit. Was hier `verified`
+steht, wurde von mindestens einem unabhängigen Anwender außerhalb des Erfinders
+mehrfach erfolgreich angewendet. Skills, die niemand zweitens nutzt, dürfen
+dauerhaft `candidate` bleiben — das ist Design, kein Bug.
+
+### Search-Ranking nach Wilson-Score
+
+Sortierung in `/playbooks/search`:
+```
+ORDER BY fts.rank,
+         wilson_lower(success_count, validation_count) DESC,
+         avg_latency_ms ASC NULLS LAST
+```
+
+Wilson-Score-Lower-Bound bestraft kleine Stichproben automatisch:
+
+| Validations | success_rate | wilson_lower |
+|-------------|--------------|--------------|
+| 1/1         | 1.00         | 0.207        |
+| 9/10        | 0.90         | 0.596        |
+| 100/100     | 1.00         | 0.964        |
+| 0/3         | 0.00         | 0.000        |
+
+→ "9/10 schlägt 1/1" — das gewünschte Verhalten.
+
+### Auto-Promote (candidate → verified)
+
+Beim Validation-Insert wird geprüft (SPEC-Konstanten in `main.py`):
+
+```
+external_success_count >= 2     UND
+wilson_lower(success_count, validation_count) >= 0.4
+```
+
+`external_success_count` zählt nur Validations mit `validator_agent != author_agent`
+— Selbst-Validierung verschiebt also nichts. Die Konfidenz-Schwelle 0.4 zündet
+genau bei 3/3 erfolgreichen Validations (wilson_lower=0.439) und passt damit zum
+typischen Bootstrap "Author validiert sich einmal, externer Agent zweimal".
+
+Bei N=2 Agenten: ein fremder Agent muss zweimal erfolgreich validiert haben +
+mind. 1 weitere success (vom Author oder von ihm selbst) für n=3.
+Bei N=10: zwei beliebige fremde Successes plus mind. 1 weitere reichen, sofern
+parallele Failures die Konfidenz nicht unter 0.4 ziehen (was sie schnell tun:
+2/3 = wilson 0.094, viel zu niedrig).
+
+Auto-Promote löst gleichzeitig **Auto-Archive** aus: alle anderen `verified`-Versionen
+desselben `skill_id` werden auf `archived` gesetzt — die neueste verified gewinnt.
+
+### Auto-Demote (candidate/verified → archived)
+
+Auch beim Validation-Insert geprüft:
+
+```
+validation_count >= 3   UND   wilson_lower < 0.3
+```
+
+Greift symmetrisch sowohl bei candidates wie bei verified — ein verified-Skill,
+der im Wild scheitert, wird nicht degradiert sondern direkt archiviert. Aus
+`archived` gibt es keinen Rückweg per API: wer den Skill reparieren will,
+submittet eine neue Version.
+
+### Manueller Promote
+
+`POST /playbooks/{id}/promote` bleibt als Eskalation: ein candidate kann manuell
+verified werden, auch wenn die Auto-Schwellen nicht erfüllt sind (z.B. wenn der
+Skill aus operativen Gründen schnell erforderlich ist). Auch dieser Pfad löst
+Auto-Archive älterer Versionen aus.
+
+### Robustheit der Schwellen
+
+| Pathologie                                  | Schutz                                      |
+|---------------------------------------------|---------------------------------------------|
+| Agent self-validates seinen Skill aufs Promote | `external_success_count` zählt nur Fremdvalidierungen |
+| Skill mit 1/1 verdrängt 9/10                | Wilson-Score statt rohe success_rate         |
+| Veraltete v1 rankt vor v10                  | Auto-Archive bei Promote setzt v1 auf archived |
+| Verified-Skill bricht durch Umweltänderung  | Auto-Demote bei wilson_lower<0.3 nach n≥3   |
+| Zwei parallele Promotes/Validations         | Atomare UPDATEs mit Status-Guard, schon vorher |
+
+Die Schwellen sind feste Konstanten — keine N-Adaptivität, kein Time-Decay,
+kein Background-Worker. Wilson-Score skaliert von sich aus mit dem Volumen.
 
 ## API Endpoints
 
@@ -252,13 +343,15 @@ Ein gemeinsames Network `hermes-net`. Volume `playbook-data` für Persistenz.
 3. **Phase 3**: `POST /playbooks/{id}/validate` + `GET /playbooks/{id}` + `POST /playbooks/{id}/promote`.
 4. **Phase 4**: `GET /playbooks/by-skill/{skill_id}/versions`.
 5. **Phase 5**: docker-compose.yml fertig + Network testen.
+6. **Phase 6**: Lifecycle und Bewertung — Wilson-Score-Ranking, Auto-Promote (Cross-
+   Validation), Auto-Demote bei Drift, Auto-Archive älterer Versionen.
 
 ## Out of Scope (bewusst)
 
 - Authentication (Stub vorbereiten, nicht aktivieren)
 - Rate Limiting
 - Embeddings/Vector Search (FTS5 reicht erstmal)
-- Auto-Promotion-Regeln (manuell durch User, später automatisierbar)
+- Time-Decay über alte Validations (Skills altern bei Re-Use, nicht von selbst)
 - Backup/Restore (Litestream oder cron-basiert separat)
 - Web-UI
 - Persistent Queue für Writes (synchroner Write-Pfad ist robust genug für 2-10 Agenten)

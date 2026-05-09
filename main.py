@@ -11,6 +11,7 @@ Volltextsuche: SQLite FTS5.
 
 import json
 import logging
+import math
 import os
 import random
 import sqlite3
@@ -45,6 +46,16 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 # für den Fall, dass beide Agenten exakt gleichzeitig schreiben.
 DB_RETRY_MAX_ATTEMPTS = 5
 DB_RETRY_BASE_DELAY = 0.05
+
+# Lifecycle-Schwellen (siehe SPEC: Lifecycle und Bewertung).
+# Auto-Promote: candidate→verified, wenn cross-validiert UND Konfidenz reicht.
+PROMOTE_MIN_EXTERNAL_SUCCESSES = 2
+# 0.4 zündet bei 3/3 (wilson=0.439) — passt zum natural Bootstrap "1 self + 2 ext".
+# Bleibt aber strikt: 2 ext_succ + 1 failure liegt schon bei 0.094 → kein Promote.
+PROMOTE_MIN_CONFIDENCE = 0.4
+# Auto-Demote: jeder Status → archived bei wiederholtem Fehlschlag.
+DEMOTE_MIN_VALIDATIONS = 3
+DEMOTE_CONFIDENCE_BELOW = 0.3
 
 logging.basicConfig(
     level=logging.INFO,
@@ -87,6 +98,28 @@ def init_db() -> None:
         conn.close()
 
 
+# ---------- Wilson Score Lower Bound (als SQLite-UDF registriert) ----------
+
+def wilson_lower(successes: int | None, total: int | None, z: float = 1.96) -> float:
+    """
+    Untere Grenze des 95%-Konfidenzintervalls für die wahre Erfolgsrate.
+    Bestraft kleine Stichproben automatisch:
+      wilson_lower(1, 1)     ≈ 0.207  (1× Erfolg ist nicht überzeugend)
+      wilson_lower(9, 10)    ≈ 0.596  (9/10 schlägt 1/1 deutlich)
+      wilson_lower(100, 100) ≈ 0.964
+      wilson_lower(0, 0)     = 0.0
+    """
+    if not total:
+        return 0.0
+    n = float(total)
+    p = float(successes or 0) / n
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    centre = p + z2 / (2.0 * n)
+    margin = z * math.sqrt(p * (1.0 - p) / n + z2 / (4.0 * n * n))
+    return max(0.0, (centre - margin) / denom)
+
+
 # ---------- Connection Dependency ----------
 
 def get_db() -> Generator[sqlite3.Connection, None, None]:
@@ -97,6 +130,8 @@ def get_db() -> Generator[sqlite3.Connection, None, None]:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA foreign_keys=ON")
+    # Wilson-Score in SQL verfügbar machen (Search-ORDER-BY, Lifecycle-Trigger).
+    conn.create_function("wilson_lower", 2, wilson_lower, deterministic=True)
     try:
         yield conn
     finally:
@@ -149,6 +184,101 @@ def _row_to_playbook_dict(row: sqlite3.Row) -> dict:
         except (json.JSONDecodeError, TypeError):
             d["metadata"] = None
     return d
+
+
+# ---------- Lifecycle: Auto-Promote / Auto-Demote / Auto-Archive ----------
+
+def _archive_older_verified_versions(
+    conn: sqlite3.Connection,
+    skill_id: str,
+    except_id: int,
+) -> None:
+    """
+    Bei Promote von vN: alle anderen verified-Versionen desselben skill_id
+    auf 'archived' setzen. Default-Annahme: neueste verified gewinnt.
+    """
+    cur = execute_with_retry(
+        conn,
+        "UPDATE playbooks SET status='archived' "
+        "WHERE skill_id = ? AND status = 'verified' AND id != ?",
+        (skill_id, except_id),
+    )
+    if cur.rowcount > 0:
+        logger.info(
+            f"Auto-Archive: {cur.rowcount} ältere verified-Version(en) "
+            f"von skill_id={skill_id} archiviert"
+        )
+
+
+def _apply_lifecycle_after_validation(
+    conn: sqlite3.Connection,
+    playbook_id: int,
+) -> None:
+    """
+    Wird nach jedem erfolgreichen Validation-Insert aufgerufen. Bewertet aktuelle
+    Statistiken und führt — wenn die Schwellen erreicht sind — Auto-Demote oder
+    Auto-Promote (inkl. Auto-Archive älterer Versionen) aus. Idempotent: jedes
+    UPDATE hat ein Status-Guard in der WHERE-Klausel, doppelte Aufrufe haben
+    keinen Effekt.
+    """
+    row = conn.execute(
+        """
+        SELECT
+            p.skill_id,
+            p.author_agent,
+            p.status,
+            COALESCE(s.validation_count, 0)       AS validation_count,
+            COALESCE(s.success_count, 0)          AS success_count,
+            COALESCE(s.external_success_count, 0) AS external_success_count,
+            wilson_lower(COALESCE(s.success_count, 0),
+                         COALESCE(s.validation_count, 0)) AS confidence
+        FROM playbooks p
+        LEFT JOIN playbook_stats s ON s.playbook_id = p.id
+        WHERE p.id = ?
+        """,
+        (playbook_id,),
+    ).fetchone()
+    if not row:
+        return
+
+    # Auto-Demote zuerst — wenn die Daten dafür sprechen, ist Promote ohnehin off.
+    if (
+        row["status"] in ("candidate", "verified")
+        and row["validation_count"] >= DEMOTE_MIN_VALIDATIONS
+        and row["confidence"] < DEMOTE_CONFIDENCE_BELOW
+    ):
+        cur = execute_with_retry(
+            conn,
+            "UPDATE playbooks SET status='archived' "
+            "WHERE id = ? AND status IN ('candidate','verified')",
+            (playbook_id,),
+        )
+        if cur.rowcount > 0:
+            logger.info(
+                f"Auto-Demote: id={playbook_id} status→archived "
+                f"(n={row['validation_count']}, confidence={row['confidence']:.3f})"
+            )
+        return
+
+    # Auto-Promote candidate → verified, wenn cross-validiert UND Konfidenz reicht.
+    if (
+        row["status"] == "candidate"
+        and row["external_success_count"] >= PROMOTE_MIN_EXTERNAL_SUCCESSES
+        and row["confidence"] >= PROMOTE_MIN_CONFIDENCE
+    ):
+        cur = execute_with_retry(
+            conn,
+            "UPDATE playbooks SET status='verified', promoted_at=CURRENT_TIMESTAMP "
+            "WHERE id = ? AND status = 'candidate'",
+            (playbook_id,),
+        )
+        if cur.rowcount > 0:
+            logger.info(
+                f"Auto-Promote: id={playbook_id} candidate→verified "
+                f"(external_success={row['external_success_count']}, "
+                f"confidence={row['confidence']:.3f})"
+            )
+            _archive_older_verified_versions(conn, row["skill_id"], playbook_id)
 
 
 # ---------- App Lifecycle ----------
@@ -304,7 +434,11 @@ def search_playbooks(
     limit: int = Query(5, ge=1, le=20),
     conn: sqlite3.Connection = Depends(get_db),
 ):
-    """Volltextsuche über FTS5. Sortiert nach FTS5-Rank, dann success_rate DESC."""
+    """
+    Volltextsuche über FTS5. Sortierung: FTS5-Rank, dann confidence (Wilson-Score-
+    Lower-Bound) DESC, dann avg_latency_ms ASC als Tiebreaker. Ein Skill mit 1/1
+    Erfolg verliert damit gegen einen mit 9/10 — kleine Stichproben werden bestraft.
+    """
     status_filter = "" if status == "all" else "AND p.status = ?"
     params: list = [q]
     if status != "all":
@@ -314,15 +448,23 @@ def search_playbooks(
     sql = f"""
         SELECT
             p.*,
-            COALESCE(s.validation_count, 0) AS validation_count,
-            COALESCE(s.success_rate, 0.0)   AS success_rate,
-            s.avg_latency_ms                AS avg_latency_ms
+            COALESCE(s.validation_count, 0)      AS validation_count,
+            COALESCE(s.success_count, 0)         AS success_count,
+            COALESCE(s.success_rate, 0.0)        AS success_rate,
+            s.avg_latency_ms                     AS avg_latency_ms,
+            COALESCE(s.external_success_count, 0) AS external_success_count,
+            COALESCE(s.distinct_validators, 0)   AS distinct_validators,
+            wilson_lower(COALESCE(s.success_count, 0),
+                         COALESCE(s.validation_count, 0)) AS confidence
         FROM playbooks_fts fts
         JOIN playbooks p ON p.id = fts.rowid
         LEFT JOIN playbook_stats s ON s.playbook_id = p.id
         WHERE playbooks_fts MATCH ?
         {status_filter}
-        ORDER BY fts.rank, s.success_rate DESC
+        ORDER BY fts.rank,
+                 wilson_lower(COALESCE(s.success_count, 0),
+                              COALESCE(s.validation_count, 0)) DESC,
+                 s.avg_latency_ms ASC NULLS LAST
         LIMIT ?
     """
 
@@ -346,9 +488,14 @@ def get_playbook(
         """
         SELECT
             p.*,
-            COALESCE(s.validation_count, 0) AS validation_count,
-            COALESCE(s.success_rate, 0.0)   AS success_rate,
-            s.avg_latency_ms                AS avg_latency_ms
+            COALESCE(s.validation_count, 0)       AS validation_count,
+            COALESCE(s.success_count, 0)          AS success_count,
+            COALESCE(s.success_rate, 0.0)         AS success_rate,
+            s.avg_latency_ms                      AS avg_latency_ms,
+            COALESCE(s.external_success_count, 0) AS external_success_count,
+            COALESCE(s.distinct_validators, 0)    AS distinct_validators,
+            wilson_lower(COALESCE(s.success_count, 0),
+                         COALESCE(s.validation_count, 0)) AS confidence
         FROM playbooks p
         LEFT JOIN playbook_stats s ON s.playbook_id = p.id
         WHERE p.id = ?
@@ -444,6 +591,11 @@ def record_validation(
         f"agent={validation.validator_agent} success={validation.success}"
     )
 
+    # Lifecycle-Trigger: aktuelle Stats bewerten, ggf. Auto-Promote oder Auto-Demote
+    # ausführen. Bewusst nach dem logger.info, damit der Insert-Effekt klar getrennt
+    # vom Lifecycle-Effekt protokolliert wird.
+    _apply_lifecycle_after_validation(conn, playbook_id)
+
     return ValidationResponse(
         id=cur.lastrowid,
         playbook_id=playbook_id,
@@ -485,6 +637,10 @@ def promote_playbook(
             detail=f"Playbook {playbook_id} wurde gleichzeitig von einem anderen Request promotet",
         )
 
+    # Auto-Archive älterer verified-Versionen desselben skill_id
+    # (manueller Promote-Pfad, symmetrisch zum Auto-Promote-Pfad).
+    _archive_older_verified_versions(conn, row["skill_id"], playbook_id)
+
     promoted_row = conn.execute(
         "SELECT id, skill_id, version, status, promoted_at FROM playbooks WHERE id = ?",
         (playbook_id,),
@@ -507,9 +663,14 @@ def list_versions(
         """
         SELECT
             p.*,
-            COALESCE(s.validation_count, 0) AS validation_count,
-            COALESCE(s.success_rate, 0.0)   AS success_rate,
-            s.avg_latency_ms                AS avg_latency_ms
+            COALESCE(s.validation_count, 0)       AS validation_count,
+            COALESCE(s.success_count, 0)          AS success_count,
+            COALESCE(s.success_rate, 0.0)         AS success_rate,
+            s.avg_latency_ms                      AS avg_latency_ms,
+            COALESCE(s.external_success_count, 0) AS external_success_count,
+            COALESCE(s.distinct_validators, 0)    AS distinct_validators,
+            wilson_lower(COALESCE(s.success_count, 0),
+                         COALESCE(s.validation_count, 0)) AS confidence
         FROM playbooks p
         LEFT JOIN playbook_stats s ON s.playbook_id = p.id
         WHERE p.skill_id = ?

@@ -65,8 +65,16 @@ class PlaybookOut(BaseModel):
     metadata: dict[str, Any] | None = None
     # aggregierte Felder aus playbook_stats view
     validation_count: int = 0
+    success_count: int = 0
     success_rate: float = 0.0
     avg_latency_ms: float | None = None
+    # confidence = wilson_lower(success_count, validation_count) — Search-Sortierung
+    # und Lifecycle-Schwellen basieren darauf, nicht auf der rohen success_rate.
+    confidence: float = 0.0
+    # external_success_count zählt nur Validations von validator_agent != author_agent
+    # — Cross-Validation-Grundlage für Auto-Promote.
+    external_success_count: int = 0
+    distinct_validators: int = 0
 
 
 class PlaybookWithValidations(PlaybookOut):

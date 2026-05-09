@@ -84,14 +84,19 @@ CREATE TRIGGER IF NOT EXISTS playbooks_au AFTER UPDATE ON playbooks BEGIN
     VALUES (new.id, new.skill_id, new.problem_domain, new.problem_description, new.approach, new.content);
 END;
 
--- View für aggregierte Validierungs-Statistiken pro Playbook
--- vereinfacht das Sortieren in der Search nach success_rate
+-- Aggregierte Stats pro Playbook. external_success_count zählt nur
+-- Validations, deren validator_agent != author_agent ist — das ist die
+-- Cross-Validation-Grundlage für Auto-Promote.
 CREATE VIEW IF NOT EXISTS playbook_stats AS
 SELECT
     p.id AS playbook_id,
     COUNT(v.id) AS validation_count,
+    COALESCE(SUM(CASE WHEN v.success THEN 1 ELSE 0 END), 0) AS success_count,
     COALESCE(AVG(CASE WHEN v.success THEN 1.0 ELSE 0.0 END), 0.0) AS success_rate,
-    AVG(v.latency_ms) AS avg_latency_ms
+    AVG(v.latency_ms) AS avg_latency_ms,
+    COALESCE(SUM(CASE WHEN v.success AND v.validator_agent != p.author_agent
+                      THEN 1 ELSE 0 END), 0) AS external_success_count,
+    COUNT(DISTINCT v.validator_agent) AS distinct_validators
 FROM playbooks p
 LEFT JOIN validations v ON v.playbook_id = p.id
 GROUP BY p.id;

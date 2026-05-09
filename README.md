@@ -38,6 +38,26 @@ Synchroner Write-Pfad mit fünf gestaffelten Schutzmechanismen:
 
 Keine Background-Worker, keine zusätzliche Queue. Bewusst minimalistisch.
 
+## Lifecycle und Bewertung
+
+Search-Ranking läuft nicht über die rohe `success_rate`, sondern über den
+**Wilson-Score-Lower-Bound** (95% Konfidenz). Das bestraft kleine Stichproben:
+9/10 schlägt 1/1, 100/100 schlägt 9/10. Plus `avg_latency_ms` als Tiebreaker.
+
+Lifecycle-Übergänge passieren als Side-Effect beim Validation-Insert:
+
+- **Auto-Promote** (candidate → verified): wenn `external_success_count ≥ 2` UND
+  `wilson_lower ≥ 0.4` (zündet bei 3/3 successes). `external_success_count` zählt
+  nur Validations mit `validator_agent != author_agent` — niemand promotet sich selbst.
+- **Auto-Demote** (* → archived): wenn `validation_count ≥ 3` UND `wilson_lower < 0.3`.
+  Aus archived gibt's keinen Rückweg per API; wer reparieren will, submittet eine neue Version.
+- **Auto-Archive supersedeter Versionen**: bei jedem Promote (manuell oder auto)
+  werden alle anderen `verified`-Versionen desselben `skill_id` auf `archived` gesetzt.
+
+Default-Annahme: die neueste verified-Version gewinnt. Skills, die niemand zweitens
+nutzt, bleiben dauerhaft `candidate` — die Registry verspricht Qualität, nicht
+Vollständigkeit.
+
 ## Schneller Start
 
 ```bash
@@ -187,13 +207,15 @@ def submit_candidate(payload, max_retries=3):
 3. **Phase 3**: `POST /playbooks/{id}/validate` + `GET /playbooks/{id}` + `POST /playbooks/{id}/promote`.
 4. **Phase 4**: `GET /playbooks/by-skill/{skill_id}/versions`.
 5. **Phase 5**: `docker-compose.yml` finalisieren + Network testen.
-6. **Phase 6** (separat): Hermes-Skills `consult-playbook-registry` und
+6. **Phase 6**: Lifecycle und Bewertung — Wilson-Score-Ranking, Auto-Promote,
+   Auto-Demote, Auto-Archive älterer Versionen.
+7. **Phase 7** (separat): Hermes-Skills `consult-playbook-registry` und
    `submit-playbook-candidate` in den Agenten implementieren.
 
 ## Bewusst ausgeklammert (für später)
 
 - Authentication (Stub-Vorbereitung im Code)
-- Auto-Promotion-Regeln (z.B. nach N erfolgreichen Cross-Validierungen)
+- Time-Decay über alte Validations (Skills altern bei Re-Use, nicht von selbst)
 - Embeddings/Vector Search (FTS5 reicht erstmal)
 - Backup/Restore (Litestream oder Cron-Job separat einrichten)
 - Web-UI
