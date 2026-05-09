@@ -4,20 +4,31 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
-    # Reine Doku-/Beispiel-Pushes triggern keinen Build. Code, Dependencies,
-    # Dockerfiles, Migrations, Tests, Workflow-File selbst → bauen.
-    paths-ignore:
-      - "**/*.md"
-      - "examples/**"
-      - "LICENSE"
-      - ".gitignore"
+    # Whitelist: nur Files, die wirklich ins Image gehen oder Tests beeinflussen,
+    # triggern den Workflow. Alles andere (setup.sh, docker-compose*.yml,
+    # README.md, SPEC.md, examples/, LICENSE …) löst KEINEN Build aus.
+    paths:
+      - "Dockerfile"
+      - "main.py"
+      - "models.py"
+      - "requirements.txt"
+      - "migrations/**"
+      - "scripts/**"
+      - "mcp-server/**"
+      - "tests/**"
+      - ".github/workflows/build-images.yml"
   pull_request:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - "examples/**"
-      - "LICENSE"
-      - ".gitignore"
+    paths:
+      - "Dockerfile"
+      - "main.py"
+      - "models.py"
+      - "requirements.txt"
+      - "migrations/**"
+      - "scripts/**"
+      - "mcp-server/**"
+      - "tests/**"
+      - ".github/workflows/build-images.yml"
 
 permissions:
   contents: read
