@@ -1,20 +1,23 @@
 """
 MCP-Wrapper für die Hermes Playbook Registry.
 
-Dünner Adapter: jeder MCP-Tool-Call wird auf einen REST-Call gegen den
-playbook-registry-Service gemappt. author_agent / validator_agent werden
-serverseitig aus der ENV AGENT_ID befüllt — der Client kann sich nicht
-selbst eine andere Identität geben.
+Ein einziger Container, der von beliebig vielen Agenten im selben
+Docker-Network genutzt wird. Agent-Identität wird beim Tool-Call übergeben
+(`as_agent`-Parameter); fehlt der, fällt der Server auf die ENV
+DEFAULT_AGENT_ID zurück. Trust kommt aus der Netzwerk-Isolation — wer
+ans MCP-Endpoint kommt, ist im hermes-net und damit autorisiert.
 
 Transports:
   MCP_TRANSPORT=stdio  (Default, für In-Process bei einem Claude-Agent)
   MCP_TRANSPORT=http   (Container-Modus, streamable-http auf MCP_PORT)
 
 Konfiguration via ENV:
-  PLAYBOOK_REGISTRY_URL  http://playbook-registry:8000
-  AGENT_ID               z.B. "hermes" — Pflicht, in Writes eingesetzt
-  MCP_TRANSPORT          stdio | http   (Default: stdio)
-  MCP_PORT               8001 (nur bei http)
+  PLAYBOOK_REGISTRY_URL   http://playbook-registry:8000  (REST-Backend)
+  DEFAULT_AGENT_ID        Default-Identity wenn `as_agent` leer ist
+                          (sinnvoll für Single-Agent-Setups: ENV setzen,
+                          Tools rufen ohne as_agent)
+  MCP_TRANSPORT           stdio | http   (Default: stdio)
+  MCP_PORT                8001 (nur bei http)
 """
 
 import json
@@ -32,14 +35,12 @@ logging.basicConfig(
 logger = logging.getLogger("mcp-wrapper")
 
 REGISTRY_URL = os.environ.get("PLAYBOOK_REGISTRY_URL", "http://playbook-registry:8000")
-AGENT_ID = os.environ.get("AGENT_ID")
-if not AGENT_ID:
-    raise RuntimeError(
-        "AGENT_ID muss gesetzt sein — wird als author_agent / validator_agent "
-        "an die Registry weitergegeben."
-    )
+DEFAULT_AGENT_ID = os.environ.get("DEFAULT_AGENT_ID", "anonymous")
 
-logger.info(f"MCP-Wrapper startet: AGENT_ID={AGENT_ID} REGISTRY_URL={REGISTRY_URL}")
+logger.info(
+    f"MCP-Wrapper startet: REGISTRY_URL={REGISTRY_URL} "
+    f"DEFAULT_AGENT_ID={DEFAULT_AGENT_ID}"
+)
 
 mcp = FastMCP("hermes-playbook-registry")
 client = httpx.AsyncClient(base_url=REGISTRY_URL, timeout=10.0)
@@ -47,6 +48,11 @@ client = httpx.AsyncClient(base_url=REGISTRY_URL, timeout=10.0)
 
 def _new_idempotency_key() -> str:
     return str(uuid.uuid4())
+
+
+def _agent(as_agent: str) -> str:
+    """Wähle Agent-ID: explicit Tool-Arg vor DEFAULT_AGENT_ID."""
+    return as_agent.strip() or DEFAULT_AGENT_ID
 
 
 # ---------- Read tools ----------
@@ -88,11 +94,11 @@ async def list_skill_versions(skill_id: str) -> list:
     return r.json()
 
 
-# ---------- Write tools (AGENT_ID server-side) ----------
-
-# Sentinel-Defaults statt T|None — FastMCP 1.13 hat einen issubclass()-Bug bei
-# Union-Type-Annotations. "" und negative Zahlen werden auf None gemappt, bevor
-# der REST-Call rausgeht. metadata kommt als JSON-String rein und wird geparst.
+# ---------- Write tools ----------
+#
+# Sentinel-Defaults statt T|None: FastMCP 1.13 hat einen issubclass()-Bug
+# bei Union-Type-Annotations. "" und negative Zahlen werden auf None gemappt,
+# bevor der REST-Call rausgeht. metadata kommt als JSON-String rein.
 
 @mcp.tool()
 async def publish_skill(
@@ -101,13 +107,18 @@ async def publish_skill(
     problem_description: str,
     approach: str,
     content: str,
+    as_agent: str = "",
     metadata_json: str = "",
 ) -> dict:
     """Publish a new playbook (or a new version of an existing skill_id) as 'candidate'.
 
-    author_agent is filled server-side from AGENT_ID, so the client cannot
-    impersonate another agent. metadata_json is an optional JSON object as
-    string (e.g. '{"latency_ms": 3200, "tags": ["gcp"]}').
+    as_agent identifies the publishing agent (z.B. "hermes" oder "hermine").
+    Leer → DEFAULT_AGENT_ID-ENV des MCP-Servers; sinnvoll für Single-Agent-
+    Setups. Bei mehreren Agenten gegen denselben MCP-Server: as_agent immer
+    explizit setzen.
+
+    metadata_json ist ein optionales JSON-Objekt als String, z.B.
+    '{"latency_ms": 3200, "tags": ["gcp"]}'.
     """
     metadata = None
     if metadata_json.strip():
@@ -116,19 +127,20 @@ async def publish_skill(
         except json.JSONDecodeError as e:
             raise ValueError(f"metadata_json is not valid JSON: {e}")
 
+    agent_id = _agent(as_agent)
     body = {
         "skill_id": skill_id,
         "problem_domain": problem_domain,
         "problem_description": problem_description,
         "approach": approach,
         "content": content,
-        "author_agent": AGENT_ID,
+        "author_agent": agent_id,
         "metadata": metadata,
         "idempotency_key": _new_idempotency_key(),
     }
     r = await client.post("/playbooks/candidate", json=body)
     r.raise_for_status()
-    logger.info(f"published skill_id={skill_id} as {AGENT_ID}")
+    logger.info(f"published skill_id={skill_id} as {agent_id}")
     return r.json()
 
 
@@ -136,21 +148,23 @@ async def publish_skill(
 async def rate_skill(
     playbook_id: int,
     success: bool,
+    as_agent: str = "",
     latency_ms: int = -1,
     model_used: str = "",
     notes: str = "",
 ) -> dict:
     """Report a validation result for a playbook (success or failure).
 
-    validator_agent is filled server-side from AGENT_ID — clients cannot fake
-    another agent's signature. Cross-validation by ≥2 external successes feeds
-    Auto-Promote on the registry side.
+    as_agent identifies the validating agent. Leer → DEFAULT_AGENT_ID. Cross-
+    validation (Successes von Agents != author_agent) feeds Auto-Promote auf
+    der Registry-Seite.
 
-    Sentinel-Werte: latency_ms=-1 oder leerer String werden als "nicht
-    gesetzt" interpretiert und gehen als null an die Registry.
+    Sentinel-Werte: latency_ms=-1 oder leerer String werden als 'nicht
+    gesetzt' interpretiert und gehen als null an die Registry.
     """
+    agent_id = _agent(as_agent)
     body = {
-        "validator_agent": AGENT_ID,
+        "validator_agent": agent_id,
         "success": success,
         "latency_ms": latency_ms if latency_ms >= 0 else None,
         "model_used": model_used or None,
@@ -159,7 +173,7 @@ async def rate_skill(
     }
     r = await client.post(f"/playbooks/{playbook_id}/validate", json=body)
     r.raise_for_status()
-    logger.info(f"rated id={playbook_id} success={success} as {AGENT_ID}")
+    logger.info(f"rated id={playbook_id} success={success} as {agent_id}")
     return r.json()
 
 
@@ -172,7 +186,7 @@ async def promote_skill(playbook_id: int) -> dict:
     """
     r = await client.post(f"/playbooks/{playbook_id}/promote")
     r.raise_for_status()
-    logger.info(f"manually promoted id={playbook_id} as {AGENT_ID}")
+    logger.info(f"manually promoted id={playbook_id}")
     return r.json()
 
 
@@ -183,8 +197,6 @@ if __name__ == "__main__":
     if transport == "stdio":
         mcp.run()
     elif transport == "http":
-        # streamable-http transport: standard MCP over HTTP, suitable for
-        # sidecar containers in a docker-compose network.
         port = int(os.environ.get("MCP_PORT", "8001"))
         mcp.settings.host = "0.0.0.0"
         mcp.settings.port = port

@@ -38,7 +38,7 @@ async def test_stdio_lists_all_tools():
         command=sys.executable,
         args=[str(SERVER_PATH)],
         env={
-            "AGENT_ID": "stdio-test",
+            "DEFAULT_AGENT_ID": "stdio-test",
             "PLAYBOOK_REGISTRY_URL": "http://127.0.0.1:0",  # nicht erreichbar, OK für list_tools
             "MCP_TRANSPORT": "stdio",
             # Python pfad damit imports funktionieren
@@ -72,7 +72,7 @@ async def test_stdio_publish_skill_call_format():
         command=sys.executable,
         args=[str(SERVER_PATH)],
         env={
-            "AGENT_ID": "stdio-test",
+            "DEFAULT_AGENT_ID": "stdio-test",
             "PLAYBOOK_REGISTRY_URL": "http://127.0.0.1:1",  # connection refused
             "MCP_TRANSPORT": "stdio",
             "PATH": "/usr/local/bin:/usr/bin:/bin",

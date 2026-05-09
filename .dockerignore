@@ -1,0 +1,36 @@
+.git
+.github
+.gitignore
+.dockerignore
+
+# Test-Suite und dev-Files gehören nicht ins Production-Image
+tests/
+docker-compose.yml
+docker-compose.dev.yml
+setup.sh
+
+# Doku & Beispiele
+README.md
+SPEC.md
+LICENSE
+examples/
+
+# Virtualenvs / Caches / Build-Artefakte
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# Lokale DB-Files (falls jemand mal direkt lokal entwickelt)
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# OS-junk
+.DS_Store
+.idea/
+.vscode/

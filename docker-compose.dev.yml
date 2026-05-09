@@ -11,9 +11,6 @@ services:
     build: .
     image: hermes-playbook-registry:dev
 
-  playbook-registry-mcp-hermes:
+  playbook-registry-mcp:
     build: ./mcp-server
-    image: hermes-playbook-registry-mcp:dev
-
-  playbook-registry-mcp-hermine:
     image: hermes-playbook-registry-mcp:dev

@@ -78,3 +78,64 @@ def test_versions_endpoint_returns_oldest_first(client):
     versions = [r["version"] for r in r.json()]
     assert versions == sorted(versions)
     assert len(versions) == 2
+
+
+def test_fts_or_operator(client):
+    _publish(client, "skill-alpha", "alpha document")
+    _publish(client, "skill-beta", "beta paragraph")
+    r = client.get(
+        "/playbooks/search",
+        params={"q": "alpha OR beta", "status": "all", "limit": 5},
+    )
+    skills = sorted(r["skill_id"] for r in r.json()["results"])
+    assert skills == ["skill-alpha", "skill-beta"]
+
+
+def test_fts_and_operator(client):
+    _publish(client, "skill-both", "alpha and beta together")
+    _publish(client, "skill-alpha-only", "alpha only here")
+    r = client.get(
+        "/playbooks/search",
+        params={"q": "alpha AND beta", "status": "all"},
+    )
+    skills = [r["skill_id"] for r in r.json()["results"]]
+    assert skills == ["skill-both"]
+
+
+def test_fts_phrase_match(client):
+    _publish(client, "skill-phrase", "exact phrase here")
+    _publish(client, "skill-words", "phrase exact here")
+    r = client.get(
+        "/playbooks/search",
+        params={"q": '"exact phrase"', "status": "all"},
+    )
+    skills = [r["skill_id"] for r in r.json()["results"]]
+    assert skills == ["skill-phrase"]
+
+
+def test_search_limit_caps_results(client):
+    """Default limit=5; mit limit=1 soll genau 1 Treffer kommen."""
+    for i in range(3):
+        _publish(client, f"skill-limit-{i}", f"limittest {i}")
+    r = client.get(
+        "/playbooks/search",
+        params={"q": "limittest", "status": "all", "limit": 1},
+    )
+    assert r.json()["total"] == 1
+
+
+def test_search_metadata_roundtrip(client):
+    """metadata wird als JSON-String gespeichert und beim Read zurückkonvertiert."""
+    body = {
+        "skill_id": "meta-test",
+        "problem_domain": "x",
+        "problem_description": "metadata roundtrip",
+        "approach": "x",
+        "content": "x",
+        "author_agent": "A",
+        "metadata": {"latency_ms": 1500, "tags": ["foo", "bar"]},
+    }
+    pid = client.post("/playbooks/candidate", json=body).json()["id"]
+    r = client.get(f"/playbooks/{pid}").json()
+    assert r["metadata"]["latency_ms"] == 1500
+    assert r["metadata"]["tags"] == ["foo", "bar"]

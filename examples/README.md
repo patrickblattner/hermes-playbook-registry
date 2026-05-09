@@ -12,23 +12,23 @@ Compose-Konfigurationen, verbunden über das gemeinsame Bridge-Network
         │                                                   │
         │   Registry-Stack (setup.sh)                       │
         │   ┌────────────────────────────────────────┐     │
-        │   │ playbook-registry        :8000         │     │
-        │   │ playbook-registry-mcp-hermes  :8001    │     │
-        │   │ playbook-registry-mcp-hermine :8001    │     │
+        │   │ playbook-registry        :8000  (REST) │     │
+        │   │ playbook-registry-mcp    :8001  (MCP)  │     │
         │   └─────────────┬──────────────────────────┘     │
         │                 │                                 │
         │           hermes-net (bridge, kein Port-Mapping)  │
         │                 │                                 │
         │   Agent-Stack (deine Compose)                     │
         │   ┌─────────────┴──────────────────────────┐     │
-        │   │ hermes-agent-1   AGENT_ID=hermes       │     │
-        │   │ hermes-agent-2   AGENT_ID=hermine      │     │
+        │   │ hermes-agent-1  → as_agent="hermes"    │     │
+        │   │ hermes-agent-2  → as_agent="hermine"   │     │
         │   └────────────────────────────────────────┘     │
         │                                                   │
         └───────────────────────────────────────────────────┘
 
   Von außen: kein Zugriff auf Registry / MCP / Agents.
   Innerhalb: Service-Namen sind via embedded DNS auflösbar.
+  Identität pro Tool-Call: as_agent-Parameter; Trust kommt durchs Network.
 ```
 
 ## Inbetriebnahme — Reihenfolge
@@ -52,20 +52,22 @@ unabhängig hoch- und runtergefahren werden, das Network überlebt. Erst
 
 | | REST direkt | MCP-Wrapper |
 |--|--|--|
-| URL | `http://playbook-registry:8000` | `http://playbook-registry-mcp-<agent>:8001/mcp` |
-| `author_agent` / `validator_agent` | Agent setzt selbst im Body | MCP-Wrapper befüllt aus seiner ENV |
-| Identity-Schutz | keiner — Client kann sich umbenennen | gegeben — Container-ENV ist die Wahrheit |
+| URL | `http://playbook-registry:8000` | `http://playbook-registry-mcp:8001/mcp` |
+| `author_agent` / `validator_agent` | Agent setzt im JSON-Body | Tool-Parameter `as_agent` |
 | Tool-Schemas / Auto-Complete | manuell, OpenAPI | automatisch über MCP-Discovery |
 | Use-Case | Cron-Jobs, Skripte, Debugging | Agent-zu-Agent (Hermes/Hermine) |
 
 Beide Varianten gleichzeitig zu nutzen ist OK — das Datenmodell ist atomar
-abgesichert (Idempotency-Keys, atomare UPDATEs).
+abgesichert (Idempotency-Keys, atomare UPDATEs). Trust kommt in beiden Fällen
+über die Network-Isolation: niemand außerhalb von `hermes-net` erreicht
+Registry oder MCP.
 
-## Mehr Agents hinzufügen
+## Mehrere Agents
 
-Pro zusätzlichem Agent: einen weiteren MCP-Wrapper-Container im
-Registry-Stack (eigene `AGENT_ID` und eigener `container_name`), und im
-Agent-Stack auf `http://playbook-registry-mcp-<neuername>:8001/mcp` zeigen.
+Alle Agenten teilen sich denselben MCP-Container. Pro Tool-Call setzen sie
+`as_agent` auf ihre eigene Identität (z.B. "hermes", "hermine"). Im
+Audit-Log (`author_agent` / `validator_agent` der Registry) ist sichtbar,
+welcher Agent was geschrieben hat.
 
 Der Auto-Promote-Schwellenwert `external_success_count ≥ 2` skaliert
 natürlich mit der Anzahl Agents — siehe SPEC.md "Lifecycle und Bewertung".

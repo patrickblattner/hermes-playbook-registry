@@ -80,9 +80,9 @@ services:
     networks:
       - hermes-net
 
-  playbook-registry-mcp-hermes:
+  playbook-registry-mcp:
     image: ghcr.io/patrickblattner/hermes-playbook-registry-mcp:${REGISTRY_TAG:-latest}
-    container_name: playbook-registry-mcp-hermes
+    container_name: playbook-registry-mcp
     restart: unless-stopped
     depends_on:
       - playbook-registry
@@ -90,23 +90,9 @@ services:
       - hermes-net
     environment:
       - PLAYBOOK_REGISTRY_URL=http://playbook-registry:8000
-      - AGENT_ID=hermes
       - MCP_TRANSPORT=http
       - MCP_PORT=8001
-
-  playbook-registry-mcp-hermine:
-    image: ghcr.io/patrickblattner/hermes-playbook-registry-mcp:${REGISTRY_TAG:-latest}
-    container_name: playbook-registry-mcp-hermine
-    restart: unless-stopped
-    depends_on:
-      - playbook-registry
-    networks:
-      - hermes-net
-    environment:
-      - PLAYBOOK_REGISTRY_URL=http://playbook-registry:8000
-      - AGENT_ID=hermine
-      - MCP_TRANSPORT=http
-      - MCP_PORT=8001
+      # Optional: DEFAULT_AGENT_ID für Single-Agent-Setups setzen.
 
 volumes:
   playbook-data:
@@ -166,7 +152,7 @@ cat <<EOF
 Hermes Playbook Registry läuft.
 
   REST (intern, im hermes-net):  http://playbook-registry:8000
-  MCP   (intern, im hermes-net):  http://playbook-registry-mcp-hermes:8001/mcp
+  MCP   (intern, im hermes-net):  http://playbook-registry-mcp:8001/mcp
 
   Daten-Volume:    hermes-playbook-registry_playbook-data (Docker-managed)
   Healthcheck:     docker exec playbook-registry /app/scripts/healthcheck.sh

@@ -3,6 +3,78 @@
 Lokaler REST-API-Service als geteilte Wissens-/Skill-Registry für mehrere Hermes-Agenten.
 Backend: SQLite mit WAL-Mode und FTS5-Volltextsuche. Keine externen Abhängigkeiten.
 
+## Installation
+
+### Empfohlen: Pre-built Images via Setup-Skript
+
+Pre-built Multi-Arch-Images (linux/amd64, linux/arm64) liegen auf
+[ghcr.io](https://github.com/patrickblattner?tab=packages). Ein einziges
+Skript zieht die Images, schreibt das `docker-compose.yml`, legt das
+gemeinsame Network `hermes-net` an und startet alles:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/patrickblattner/hermes-playbook-registry/main/setup.sh | bash
+```
+
+Das ist der bevorzugte Weg — kein Source-Klon, kein lokaler Build, kein
+Image-Bau. Idempotent: nochmal laufen aktualisiert auf den neuesten
+`:latest`-Tag (`pull && up -d` recreated nur geänderte Container).
+
+**Konfigurations-ENV (alle optional):**
+
+| Variable        | Default                              | Zweck                                       |
+|-----------------|--------------------------------------|---------------------------------------------|
+| `INSTALL_DIR`   | `$HOME/hermes-playbook-registry`     | Wo `docker-compose.yml` und Daten landen    |
+| `REGISTRY_TAG`  | `latest`                             | Welches Image-Tag pullen (z.B. `v1.0`, sha) |
+| `GHCR_USER`     | —                                    | GitHub-Username (nur falls Images privat)   |
+| `GHCR_TOKEN`    | —                                    | PAT mit `read:packages` (nur falls privat)  |
+
+```bash
+# Beispiel: anderer Pfad, fixiertes Tag
+INSTALL_DIR=/opt/hermes-playbook-registry REGISTRY_TAG=latest bash setup.sh
+```
+
+**Stop / Update / Cleanup:**
+
+```bash
+cd ~/hermes-playbook-registry
+docker compose logs -f                                  # Logs
+docker compose down                                     # stoppen, Daten bleiben
+docker compose down -v                                  # stoppen + Daten weg
+INSTALL_DIR=~/hermes-playbook-registry bash setup.sh    # update auf :latest
+```
+
+**Wichtige Hinweise:**
+
+- `setup.sh` legt das Bridge-Network `hermes-net` einmal pro Host an. Externe
+  Agent-Stacks hängen sich danach via `external: true` ins selbe Network —
+  siehe [Architektur / Network-Setup](#network-setup-für-mehrere-agent-stacks)
+  und `examples/hermes-agent-stack.yml`.
+- Beide GHCR-Packages müssen einmalig nach dem ersten Build auf `public`
+  gestellt werden (sonst braucht `setup.sh` die `GHCR_*`-Variablen). Direktlink:
+  `https://github.com/users/patrickblattner/packages/container/hermes-playbook-registry/settings`
+
+### Alternative: aus dem Source-Tree bauen
+
+Nur sinnvoll, wenn du Code-Änderungen lokal testen willst, ohne erst zu
+pushen und auf den CI-Build zu warten.
+
+```bash
+git clone https://github.com/patrickblattner/hermes-playbook-registry
+cd hermes-playbook-registry
+docker network create hermes-net 2>/dev/null || true
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+```
+
+Tests gegen den lokalen Code:
+
+```bash
+docker run --rm -v "$(pwd)":/app -w /app python:3.12 bash -c "
+  pip install -q -r requirements.txt -r mcp-server/requirements.txt -r tests/requirements.txt
+  python -m pytest tests/ -v
+"
+```
+
 ## Architektur
 
 ```
@@ -10,17 +82,16 @@ Backend: SQLite mit WAL-Mode und FTS5-Volltextsuche. Keine externen Abhängigkei
         │                                                         │
         │  Registry-Stack (setup.sh)                              │
         │  ┌──────────────────────────────────────────────┐       │
-        │  │ playbook-registry        :8000  (REST/FTS5)  │       │
-        │  │ playbook-registry-mcp-hermes   :8001  (MCP)  │       │
-        │  │ playbook-registry-mcp-hermine  :8001  (MCP)  │       │
+        │  │ playbook-registry      :8000  (REST/FTS5)    │       │
+        │  │ playbook-registry-mcp  :8001  (MCP)          │       │
         │  └─────────────┬────────────────────────────────┘       │
         │                │                                        │
         │          hermes-net (bridge, kein Port-Mapping nach außen)
         │                │                                        │
         │  Agent-Stack (deine Compose, externer Stack)            │
         │  ┌─────────────┴────────────────────────────────┐       │
-        │  │ hermes-agent-1   nutzt …mcp-hermes:8001/mcp  │       │
-        │  │ hermes-agent-2   nutzt …mcp-hermine:8001/mcp │       │
+        │  │ hermes-agent-1  ruft mit as_agent="hermes"   │       │
+        │  │ hermes-agent-2  ruft mit as_agent="hermine"  │       │
         │  └──────────────────────────────────────────────┘       │
         │                                                         │
         └─────────────────────────────────────────────────────────┘
@@ -30,10 +101,11 @@ Backend: SQLite mit WAL-Mode und FTS5-Volltextsuche. Keine externen Abhängigkei
         └──────────────────────┘
 ```
 
-Drei Container im Registry-Stack: **REST-Service** + **zwei MCP-Wrapper**
-(einer pro Agent, mit jeweils eigener `AGENT_ID` als ENV — der Wrapper
-befüllt damit `author_agent`/`validator_agent` serverseitig, sodass kein
-Client sich eine fremde Identität geben kann).
+Zwei Container im Registry-Stack: **REST-Service** und **ein MCP-Wrapper**,
+der von allen Agenten im `hermes-net` gemeinsam genutzt wird. Identität wird
+pro Tool-Call übergeben (`as_agent`-Parameter, z.B. `"hermes"` oder
+`"hermine"`); Trust kommt aus der Network-Isolation — niemand außerhalb von
+`hermes-net` erreicht Registry oder MCP.
 
 Promotion-Pipeline: Agent reicht **Kandidat** ein → andere Agenten
 **validieren** → automatische **Promotion** zu *verified* (Cross-Validation
@@ -110,7 +182,7 @@ die Registry agent-nativ verfügbar macht. REST bleibt Source of Truth.
 ┌──────────────┐  MCP   ┌──────────────────┐  HTTP   ┌─────────────────┐
 │ Hermes-Agent ├───────▶│  mcp-wrapper     ├────────▶│ playbook-       │
 └──────────────┘        │  (FastMCP,       │         │ registry (REST) │
-┌──────────────┐  MCP   │   AGENT_ID env)  │         │                 │
+┌──────────────┐  MCP   │   shared)        │         │                 │
 │ Hermine      ├───────▶└──────────────────┘         └─────────────────┘
 └──────────────┘
 ```
@@ -118,74 +190,31 @@ die Registry agent-nativ verfügbar macht. REST bleibt Source of Truth.
 Tool-Liste: `search_skills`, `get_skill`, `list_skill_versions`,
 `publish_skill`, `rate_skill`, `promote_skill`.
 
-`author_agent` und `validator_agent` kommen serverseitig aus der ENV `AGENT_ID`
-des MCP-Containers — der Client kann seine Identität nicht fälschen.
+Die Schreib-Tools (`publish_skill`, `rate_skill`) nehmen einen optionalen
+`as_agent`-Parameter, der zur `author_agent` bzw. `validator_agent` im
+Registry-Datenmodell wird. Wenn `as_agent` leer bleibt, fällt der Server auf
+die ENV `DEFAULT_AGENT_ID` zurück (sinnvoll für Single-Agent-Setups).
+Trust kommt aus der Netzwerk-Isolation: nur Container im `hermes-net` reden
+mit dem MCP-Endpunkt.
 
 ### Modi
 
-- **STDIO** (Empfehlung für In-Process-Nutzung): in der Claude-Config des Agenten
-  registrieren mit `command="python", args=["mcp-server/server.py"], env={AGENT_ID, PLAYBOOK_REGISTRY_URL}`.
+- **STDIO** (für In-Process-Nutzung neben einem Claude-Agent): in der
+  Claude-Config registrieren mit `command="python", args=["mcp-server/server.py"]`,
+  optional `env={DEFAULT_AGENT_ID, PLAYBOOK_REGISTRY_URL}`.
 - **HTTP** (für Container-Deployment, Default in `docker-compose.yml`): MCP-Wrapper
   läuft als eigener Service im `hermes-net` und exponiert `streamable-http` auf
-  Port 8001. Andere Container reden via `http://playbook-registry-mcp-<agent>:8001/mcp`.
+  Port 8001. Alle Agenten im Network reden über `http://playbook-registry-mcp:8001/mcp`.
 
 ### Aktivieren
 
 ```bash
-docker compose up -d --build  # bringt registry + mcp-hermes hoch
+docker compose up -d --build  # bringt registry + mcp hoch
 ```
 
 Für einen zweiten Agent (Hermine): den auskommentierten Block in
 `docker-compose.yml` aktivieren oder einen weiteren Container mit anderer
 `AGENT_ID` starten.
-
-## Schneller Start (Production)
-
-Pre-built Images sind als ghcr.io-Pakete verfügbar. Für ein neues Setup
-genügt das Setup-Skript:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/patrickblattner/hermes-playbook-registry/main/setup.sh | bash
-```
-
-Default-Install-Pfad: `~/hermes-playbook-registry`. Anpassen via:
-
-```bash
-INSTALL_DIR=/opt/hermes-playbook-registry bash setup.sh
-```
-
-Das Skript ist idempotent — nochmal laufen aktualisiert auf den neuesten
-Image-Tag (`pull && up -d` nur recreated geänderte Container).
-
-Stop / Update:
-
-```bash
-cd ~/hermes-playbook-registry
-docker compose logs -f                                  # Logs
-docker compose down                                     # stoppen, Daten bleiben
-docker compose down -v                                  # stoppen + Daten weg
-INSTALL_DIR=~/hermes-playbook-registry bash setup.sh    # update
-```
-
-## Schneller Start (Development, aus Source)
-
-Wer Code-Änderungen testen will, ohne erst pushen zu müssen, lädt zusätzlich
-`docker-compose.dev.yml` als Override:
-
-```bash
-git clone https://github.com/patrickblattner/hermes-playbook-registry
-cd hermes-playbook-registry
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
-```
-
-Tests gegen den lokalen Code:
-
-```bash
-docker run --rm -v "$(pwd)":/app -w /app python:3.12 bash -c "
-  pip install -q -r requirements.txt -r mcp-server/requirements.txt -r tests/requirements.txt
-  python -m pytest tests/ -v
-"
-```
 
 ## API-Übersicht
 

@@ -47,7 +47,12 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install dependencies
+      - name: Install system deps
+        # sqlite3-CLI wird von tests/test_scripts.py für backup.sh / restore.sh
+        # genutzt. ubuntu-latest hat es meist schon, wir stellen es sicher.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq sqlite3
+
+      - name: Install Python dependencies
         # Eine einzige pip-Invocation, sodass der Resolver die Schnittmenge
         # aller drei Requirement-Files findet. Sequenzielle Installs upgraden
         # sonst transitive Deps (z.B. starlette → 1.0 wegen sse-starlette),
