@@ -4,7 +4,7 @@
 
 services:
   playbook-registry:
-    build: ./registry-service
+    build: .
     container_name: playbook-registry
     restart: unless-stopped
     volumes:
