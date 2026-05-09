@@ -1,0 +1,58 @@
+# docker-compose.yml
+# Orchestriert den Registry-Service und (als Platzhalter) zwei Hermes-Agenten
+# in einem gemeinsamen internen Network.
+
+services:
+  playbook-registry:
+    build: ./registry-service
+    container_name: playbook-registry
+    restart: unless-stopped
+    volumes:
+      - playbook-data:/data
+    networks:
+      - hermes-net
+    # Standardmäßig kein Port-Mapping nach außen — der Service ist nur
+    # innerhalb des hermes-net erreichbar (sicherer).
+    # Zum Debuggen vom Host aus: untenstehende Zeile auskommentieren.
+    # ports:
+    #   - "127.0.0.1:8080:8000"
+
+  # ---- Platzhalter für deine Agenten ----
+  # Anpassen an dein tatsächliches Hermes-Setup. Wichtig sind nur:
+  #   - im selben Network (hermes-net)
+  #   - PLAYBOOK_REGISTRY_URL gesetzt
+  #   - AGENT_ID eindeutig
+
+  # hermes-agent-1:
+  #   image: dein-hermes-image:latest
+  #   container_name: hermes-agent-1
+  #   restart: unless-stopped
+  #   networks:
+  #     - hermes-net
+  #   environment:
+  #     - PLAYBOOK_REGISTRY_URL=http://playbook-registry:8000
+  #     - AGENT_ID=agent-1
+  #   volumes:
+  #     - hermes-agent-1-data:/root/.hermes
+
+  # hermes-agent-2:
+  #   image: dein-hermes-image:latest
+  #   container_name: hermes-agent-2
+  #   restart: unless-stopped
+  #   networks:
+  #     - hermes-net
+  #   environment:
+  #     - PLAYBOOK_REGISTRY_URL=http://playbook-registry:8000
+  #     - AGENT_ID=agent-2
+  #   volumes:
+  #     - hermes-agent-2-data:/root/.hermes
+
+volumes:
+  playbook-data:
+    driver: local
+  # hermes-agent-1-data:
+  # hermes-agent-2-data:
+
+networks:
+  hermes-net:
+    driver: bridge
