@@ -14,10 +14,10 @@ gemeinsame Network `hermes-net` an und startet alles:
 
 ```bash
 # Wechsle vorher in das Verzeichnis, in dem das Projekt-Unterverzeichnis
-# entstehen soll (z.B. ~/Docker), dann:
-cd ~/Docker
+# entstehen soll (z.B. ~/docker), dann:
+cd ~/docker
 curl -fsSL https://raw.githubusercontent.com/patrickblattner/hermes-playbook-registry/main/deploy.sh | bash
-# → ~/Docker/hermes-playbook-registry/  wird angelegt
+# → ~/docker/hermes-playbook-registry/  wird angelegt
 ```
 
 Das ist der bevorzugte Weg — kein Source-Klon, kein lokaler Build, kein
@@ -41,7 +41,7 @@ INSTALL_DIR=/opt/hermes-playbook-registry REGISTRY_TAG=latest bash deploy.sh
 **Stop / Update / Cleanup:**
 
 ```bash
-cd <dein-INSTALL_DIR>                                   # z.B. ~/Docker/hermes-playbook-registry
+cd <dein-INSTALL_DIR>                                   # z.B. ~/docker/hermes-playbook-registry
 docker compose logs -f                                  # Logs
 docker compose down                                     # stoppen, Daten bleiben
 docker compose down -v                                  # stoppen + Daten weg
