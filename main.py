@@ -120,7 +120,6 @@ def execute_with_retry(
     Andere OperationalErrors (z.B. UNIQUE Constraint Violation kommt als
     IntegrityError) werden NICHT retryt → sofort weitergereicht.
     """
-    last_error: sqlite3.OperationalError | None = None
     for attempt in range(max_attempts):
         try:
             cur = conn.execute(sql, params)
@@ -130,15 +129,13 @@ def execute_with_retry(
             msg = str(e).lower()
             if "locked" not in msg and "busy" not in msg:
                 raise
-            last_error = e
-            if attempt < max_attempts - 1:
-                delay = DB_RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.05)
-                logger.warning(
-                    f"DB locked (attempt {attempt + 1}/{max_attempts}), retry in {delay:.3f}s"
-                )
-                time.sleep(delay)
-    assert last_error is not None
-    raise last_error
+            if attempt == max_attempts - 1:
+                raise
+            delay = DB_RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.05)
+            logger.warning(
+                f"DB locked (attempt {attempt + 1}/{max_attempts}), retry in {delay:.3f}s"
+            )
+            time.sleep(delay)
 
 
 # ---------- Helper: Row -> Dict für Pydantic ----------
@@ -221,67 +218,83 @@ def submit_candidate(
                 idempotent_replay=True,
             )
 
-    # 2. Nächste Version für diesen skill_id ermitteln.
-    max_version = conn.execute(
-        "SELECT MAX(version) FROM playbooks WHERE skill_id = ?",
-        (submission.skill_id,),
-    ).fetchone()[0]
-    new_version = (max_version or 0) + 1
-
     metadata_json = json.dumps(submission.metadata) if submission.metadata else None
 
-    # 3. Insert mit Retry-Wrapper. IntegrityError fängt die Race-Condition,
-    #    falls zwei gleichzeitige Requests mit demselben Key beide den Pre-Check passieren.
-    try:
-        cur = execute_with_retry(
-            conn,
-            """
-            INSERT INTO playbooks
-                (skill_id, version, status, problem_domain, problem_description,
-                 approach, content, author_agent, metadata, idempotency_key)
-            VALUES (?, ?, 'candidate', ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                submission.skill_id,
-                new_version,
-                submission.problem_domain,
-                submission.problem_description,
-                submission.approach,
-                submission.content,
-                submission.author_agent,
-                metadata_json,
-                submission.idempotency_key,
-            ),
-        )
-    except sqlite3.IntegrityError as e:
-        if submission.idempotency_key and "idempotency_key" in str(e).lower():
-            existing = conn.execute(
-                "SELECT id, skill_id, version, status FROM playbooks WHERE idempotency_key = ?",
-                (submission.idempotency_key,),
-            ).fetchone()
-            if existing:
-                return CandidateResponse(
-                    id=existing["id"],
-                    skill_id=existing["skill_id"],
-                    version=existing["version"],
-                    status=existing["status"],
-                    idempotent_replay=True,
+    # 2. Auto-Version + Insert mit innerem Race-Retry. Zwei parallele Submits ohne
+    #    idempotency_key zum gleichen skill_id berechnen denselben MAX(version)+1
+    #    und kollidieren auf UNIQUE(skill_id, version) — wir lesen MAX dann frisch
+    #    und versuchen es erneut. rollback() sorgt dafür, dass der nächste Read
+    #    nicht im stale Snapshot der gescheiterten Transaktion festklebt.
+    VERSION_RACE_RETRIES = 3
+    for retry in range(VERSION_RACE_RETRIES):
+        max_version = conn.execute(
+            "SELECT MAX(version) FROM playbooks WHERE skill_id = ?",
+            (submission.skill_id,),
+        ).fetchone()[0]
+        new_version = (max_version or 0) + 1
+
+        try:
+            cur = execute_with_retry(
+                conn,
+                """
+                INSERT INTO playbooks
+                    (skill_id, version, status, problem_domain, problem_description,
+                     approach, content, author_agent, metadata, idempotency_key)
+                VALUES (?, ?, 'candidate', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    submission.skill_id,
+                    new_version,
+                    submission.problem_domain,
+                    submission.problem_description,
+                    submission.approach,
+                    submission.content,
+                    submission.author_agent,
+                    metadata_json,
+                    submission.idempotency_key,
+                ),
+            )
+            new_id = cur.lastrowid
+            logger.info(
+                f"Kandidat eingereicht: id={new_id} skill_id={submission.skill_id} "
+                f"version={new_version} author={submission.author_agent}"
+            )
+            return CandidateResponse(
+                id=new_id,
+                skill_id=submission.skill_id,
+                version=new_version,
+                status="candidate",
+                idempotent_replay=False,
+            )
+        except sqlite3.IntegrityError as e:
+            conn.rollback()
+            msg = str(e).lower()
+
+            # Fall A: idempotency_key-Race — anderer Request war minimal schneller.
+            if submission.idempotency_key and "idempotency_key" in msg:
+                existing = conn.execute(
+                    "SELECT id, skill_id, version, status FROM playbooks WHERE idempotency_key = ?",
+                    (submission.idempotency_key,),
+                ).fetchone()
+                if existing:
+                    return CandidateResponse(
+                        id=existing["id"],
+                        skill_id=existing["skill_id"],
+                        version=existing["version"],
+                        status=existing["status"],
+                        idempotent_replay=True,
+                    )
+                raise HTTPException(status_code=409, detail=f"Integrity error: {e}")
+
+            # Fall B: (skill_id, version)-Race — neuer MAX, neuer Versuch.
+            if "skill_id" in msg and "version" in msg and retry < VERSION_RACE_RETRIES - 1:
+                logger.warning(
+                    f"Version race for skill_id={submission.skill_id}, "
+                    f"retry {retry + 2}/{VERSION_RACE_RETRIES}"
                 )
-        raise HTTPException(status_code=409, detail=f"Integrity error: {e}")
+                continue
 
-    new_id = cur.lastrowid
-    logger.info(
-        f"Kandidat eingereicht: id={new_id} skill_id={submission.skill_id} "
-        f"version={new_version} author={submission.author_agent}"
-    )
-
-    return CandidateResponse(
-        id=new_id,
-        skill_id=submission.skill_id,
-        version=new_version,
-        status="candidate",
-        idempotent_replay=False,
-    )
+            raise HTTPException(status_code=409, detail=f"Integrity error: {e}")
 
 
 @app.get("/playbooks/search", response_model=SearchResponse)
@@ -409,6 +422,9 @@ def record_validation(
             ),
         )
     except sqlite3.IntegrityError as e:
+        # rollback bevor wir den Replay-Match suchen, sonst sieht der Read noch
+        # den stale Snapshot der gescheiterten Transaktion.
+        conn.rollback()
         if validation.idempotency_key and "idempotency_key" in str(e).lower():
             existing = conn.execute(
                 "SELECT id, playbook_id FROM validations WHERE idempotency_key = ?",
@@ -454,11 +470,20 @@ def promote_playbook(
             detail=f"Playbook {playbook_id} hat status='{row['status']}', kann nicht promotet werden",
         )
 
-    execute_with_retry(
+    # Atomar: AND status='candidate' verhindert TOCTOU bei zwei parallelen
+    # Promote-Requests (sonst könnten beide den Vor-Check passieren und beide
+    # erfolgreich UPDATE machen). rowcount=0 zeigt: ein anderer Request war zuerst.
+    cur = execute_with_retry(
         conn,
-        "UPDATE playbooks SET status='verified', promoted_at=CURRENT_TIMESTAMP WHERE id = ?",
+        "UPDATE playbooks SET status='verified', promoted_at=CURRENT_TIMESTAMP "
+        "WHERE id = ? AND status='candidate'",
         (playbook_id,),
     )
+    if cur.rowcount == 0:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Playbook {playbook_id} wurde gleichzeitig von einem anderen Request promotet",
+        )
 
     promoted_row = conn.execute(
         "SELECT id, skill_id, version, status, promoted_at FROM playbooks WHERE id = ?",
